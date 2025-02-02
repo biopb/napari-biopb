@@ -1,0 +1,13 @@
+name: napari-biopb
+display_name: single-cell segmentation
+visibility: public
+# see https://napari.org/stable/plugins/technical_references/manifest.html#fields for valid categories
+categories: ["Annotation", "Segmentation"]
+contributions:
+  commands:
+    - id: napari-biopb.make_biopb_image_widget
+      python_name: napari_biopb:BiopbImageWidget
+      title: BioPB Plugin
+  widgets:
+    - command: napari-biopb.make_biopb_image_widget
+      display_name: BioPB
