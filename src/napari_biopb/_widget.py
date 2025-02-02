@@ -1,7 +1,7 @@
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from magicgui.widgets import Container, create_widget
+from magicgui.widgets import Container, ProgressBar, create_widget
 
 if TYPE_CHECKING:
     import napari
@@ -66,6 +66,9 @@ class BiopbImageWidget(Container):
         self._run_button = create_widget(label="Run", widget_type="Button")
         self._run_button.changed.connect(self.run)
 
+        self._progress_bar = ProgressBar(label="Running", value=0, step=1)
+        self._progress_bar.visible = False
+
         # append into/extend the container with your widgets
         self.extend(
             [
@@ -76,11 +79,18 @@ class BiopbImageWidget(Container):
                 self._nms,
                 self._nms_iou,
                 self._run_button,
+                self._progress_bar,
             ]
         )
 
     def run(self):
         from ._grpc import grpc_call
+
+        self._run_button.enabled = False
+        self._run_button.visible = False
+
+        self._progress_bar.visible = True
+        self._progress_bar.value = 0
 
         image_layer = self._image_layer_combo.value
         name = image_layer.name + "_label"
@@ -91,3 +101,7 @@ class BiopbImageWidget(Container):
             self._viewer.layers[name].data = labels
         else:
             self._viewer.add_labels(labels, name=name)
+
+        self._progress_bar.visible = False
+        self._run_button.enabled = True
+        self._run_button.visible = True

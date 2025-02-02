@@ -96,6 +96,7 @@ def grpc_call(widget: BiopbImageWidget) -> np.ndarray:
         image_data = image_data.reshape((-1,) + img_dim + (1,))
 
     assert image_data.ndim == 4
+    widget._progress_bar.max = len(image_data)
 
     settings = _get_settings(widget)
 
@@ -112,6 +113,7 @@ def grpc_call(widget: BiopbImageWidget) -> np.ndarray:
                     response, np.zeros(image_data.shape[1:-1], dtype="uint16")
                 )
             )
+            widget._progress_bar.increment()
 
     if image_layer.rgb:
         labels = np.reshape(labels, image_layer.data.shape[:-1])
