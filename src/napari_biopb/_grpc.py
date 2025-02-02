@@ -6,9 +6,7 @@ import numpy as np
 from ._widget import BiopbImageWidget
 
 
-def _build_request(
-    image: np.ndarray, settings: proto.DetectionSettings | None = None
-) -> proto.DetectionRequest:
+def _build_request(image: np.ndarray, values: dict) -> proto.DetectionRequest:
     """Serialize a np image array as ImageData protobuf"""
     assert (
         image.ndim == 3 or image.ndim == 4
@@ -32,20 +30,18 @@ def _build_request(
             size_x=image.shape[-2],
             size_y=image.shape[-3],
             size_z=image.shape[-4],
+            physical_size_x=values["Pixel Size X"],
+            physical_size_y=values["Pixel Size Y"],
+            physical_size_z=values["Pixel Size Z"],
             dimension_order="CXYZT",
             dtype=dt_str,
         ),
     )
 
-    if settings is not None:
-        request = proto.DetectionRequest(
-            image_data=image_data,
-            detection_settings=settings,
-        )
-    else:
-        request = proto.DetectionRequest(
-            image_data=image_data,
-        )
+    request = proto.DetectionRequest(
+        image_data=image_data,
+        detection_settings=_get_settings(values),
+    )
 
     return request
 
@@ -58,7 +54,10 @@ def _get_channel(values: dict):
         server_url += ":443"
         port = 443
 
-    if port == 443:
+    scheme = values["Scheme"]
+    if scheme == "Auto":
+        scheme = "HTTPS" if port == 443 else "HTTP"
+    if scheme == "HTTPS":
         return grpc.secure_channel(
             target=server_url,
             credentials=grpc.ssl_channel_credentials(),
@@ -72,7 +71,14 @@ def _get_channel(values: dict):
 
 
 def _get_settings(values: dict):
-    nms_iou = values["NMS Iou"] if values["NMS"] else 0
+    nms_values = {
+        "Off": 0.0,
+        "Iou-0.2": 0.2,
+        "Iou-0.4": 0.4,
+        "Iou-0.6": 0.6,
+        "Iou-0.8": 0.8,
+    }
+    nms_iou = nms_values[values["NMS"]]
 
     return proto.DetectionSettings(
         min_score=values["Min Score"],
@@ -157,15 +163,13 @@ def grpc_call(widget: BiopbImageWidget) -> np.ndarray:
     assert image_data.ndim == 4 or image_data.ndim == 5
     progress_bar.max = len(image_data)
 
-    settings = _get_settings(widget_values)
-
     # call server
     with _get_channel(widget_values) as channel:
         stub = proto.ObjectDetectionStub(channel)
 
         labels = []
         for image in image_data:
-            request = _build_request(image, settings)
+            request = _build_request(image, widget_values)
 
             timeout = 300 if is3d else 5
 
