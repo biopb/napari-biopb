@@ -32,6 +32,7 @@ dependencies = [
     "biopb",
     "opencv-python-headless",
     "grpcio_tools",
+    "vedo",
 ]
 
 [project.optional-dependencies]

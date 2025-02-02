@@ -17,17 +17,23 @@ def _build_request(
     if image.ndim == 3:
         image = image[None, ...]
 
-    image = np.ascontiguousarray(image, ">f2")
+    # image = np.ascontiguousarray(image, ">f2")
+
+    print(image.shape)
+    dt_str = image.dtype.str
 
     image_data = proto.ImageData(
         pixels=proto.Pixels(
-            bindata=proto.BinData(data=image.tobytes()),
+            bindata=proto.BinData(
+                data=image.tobytes(),
+                endianness=1 if dt_str[0] == "<" else 0,
+            ),
             size_c=image.shape[-1],
             size_x=image.shape[-2],
             size_y=image.shape[-3],
             size_z=image.shape[-4],
             dimension_order="CXYZT",
-            dtype="f2",
+            dtype=dt_str,
         ),
     )
 
@@ -44,8 +50,8 @@ def _build_request(
     return request
 
 
-def _get_channel(widget: BiopbImageWidget):
-    server_url = widget._server.value
+def _get_channel(values: dict):
+    server_url = values["Server"]
     if ":" in server_url:
         _, port = server_url.split(":")
     else:
@@ -54,66 +60,125 @@ def _get_channel(widget: BiopbImageWidget):
 
     if port == 443:
         return grpc.secure_channel(
-            target=server_url, credentials=grpc.ssl_channel_credentials()
+            target=server_url,
+            credentials=grpc.ssl_channel_credentials(),
+            options=[("grpc.max_receive_message_length", 1024 * 1024 * 512)],
         )
     else:
         return grpc.insecure_channel(
             target=server_url,
+            options=[("grpc.max_receive_message_length", 1024 * 1024 * 512)],
         )
 
 
-def _get_settings(widget: BiopbImageWidget):
-    nms_iou = widget._nms_iou.value if widget._nms.value else 0
+def _get_settings(values: dict):
+    nms_iou = values["NMS Iou"] if values["NMS"] else 0
 
     return proto.DetectionSettings(
-        min_score=widget._threshold.value,
+        min_score=values["Min Score"],
         nms_iou=nms_iou,
-        cell_diameter_hint=widget._size_hint.value,
+        cell_diameter_hint=values["Size Hint"],
     )
 
 
-def _generate_label(response, label):
-    for k, det in enumerate(response.detections):
-        polygon = [[p.x, p.y] for p in det.roi.polygon.points]
-        polygon = np.round(np.array(polygon)).astype(int)
+def _render_meshes(response, label):
+    from vedo import Mesh
 
-        cv2.fillPoly(label, [polygon], k + 1)
+    meshes = []
+    for det in response.detections:
+        verts, cells = [], []
+        for vert in det.roi.mesh.verts:
+            verts.append(
+                [
+                    vert.z,
+                    vert.y,
+                    vert.x,
+                ]
+            )
+        for face in det.roi.mesh.faces:
+            cells.append([face.p1, face.p2, face.p3])
+        meshes.append(Mesh([verts, cells]))
+
+    for k, mesh in reversed(list(enumerate(meshes))):
+        origin = np.floor(mesh.bounds()[::2]).astype(int)
+        origin = np.maximum(origin, 0)
+        max_size = np.array(label.shape) - origin
+        vol = mesh.binarize(
+            values=(k + 1, 0),
+            spacing=[1, 1, 1],
+            origin=origin + 0.5,
+        )
+        vol_d = vol.tonumpy()[: max_size[0], : max_size[1], : max_size[2]]
+        size = tuple(vol_d.shape)
+        region = label[
+            origin[0] : origin[0] + size[0],
+            origin[1] : origin[1] + size[1],
+            origin[2] : origin[2] + size[2],
+        ]
+        region[...] = np.maximum(region, vol_d)
+
+    return label
+
+
+def _generate_label(response, label):
+    if label.ndim == 2:
+        for k, det in enumerate(response.detections):
+            polygon = [[p.x, p.y] for p in det.roi.polygon.points]
+            polygon = np.round(np.array(polygon)).astype(int)
+
+            cv2.fillPoly(label, [polygon], k + 1)
+    elif label.ndim == 3:
+        _render_meshes(response, label)
+    else:
+        raise ValueError(
+            f"supplied label template is not 2d or 3d: {label.shape}"
+        )
 
     return label
 
 
 def grpc_call(widget: BiopbImageWidget) -> np.ndarray:
     """make grpc call based on current widget values"""
-    image_layer = widget._image_layer_combo.value
+    widget_values = widget.snapshot()
+    progress_bar = widget._progress_bar
+
+    image_layer = widget_values["Image"]
     image_data = image_layer.data
+    is3d = widget_values["3D"]
 
     # proprocess
     if image_layer.rgb:
-        img_dim = image_data.shape[-3:]
+        img_dim = image_data.shape[-4:] if is3d else image_data.shape[-3:]
         image_data = image_data.reshape((-1,) + img_dim)
     else:
-        img_dim = image_data.shape[-2:]
+        img_dim = image_data.shape[-3:] if is3d else image_data.shape[-2:]
         image_data = image_data.reshape((-1,) + img_dim + (1,))
 
-    assert image_data.ndim == 4
-    widget._progress_bar.max = len(image_data)
+    assert image_data.ndim == 4 or image_data.ndim == 5
+    progress_bar.max = len(image_data)
 
-    settings = _get_settings(widget)
+    settings = _get_settings(widget_values)
 
     # call server
-    with _get_channel(widget) as channel:
+    with _get_channel(widget_values) as channel:
         stub = proto.ObjectDetectionStub(channel)
 
         labels = []
         for image in image_data:
             request = _build_request(image, settings)
-            response = stub.RunDetection(request)
+
+            timeout = 300 if is3d else 5
+
+            response = stub.RunDetection(request, timeout=timeout)
+
+            print(f"Detected {len(response.detections)} cells")
+
             labels.append(
                 _generate_label(
                     response, np.zeros(image_data.shape[1:-1], dtype="uint16")
                 )
             )
-            widget._progress_bar.increment()
+            progress_bar.increment()
 
     if image_layer.rgb:
         labels = np.reshape(labels, image_layer.data.shape[:-1])

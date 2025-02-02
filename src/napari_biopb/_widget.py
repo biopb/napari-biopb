@@ -1,6 +1,7 @@
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
+from grpc import RpcError
 from magicgui.widgets import Container, ProgressBar, create_widget
 
 if TYPE_CHECKING:
@@ -17,6 +18,8 @@ class BiopbImageWidget(Container):
         self._image_layer_combo = create_widget(
             label="Image", annotation="napari.layers.Image"
         )
+        self._is3d = create_widget(label="3D", annotation=bool)
+
         self._server = create_widget(
             value="lacss.biopb.org",
             label="Server",
@@ -69,22 +72,28 @@ class BiopbImageWidget(Container):
         self._progress_bar = ProgressBar(label="Running", value=0, step=1)
         self._progress_bar.visible = False
 
+        self._elements = [
+            self._image_layer_combo,
+            self._is3d,
+            self._server,
+            self._threshold,
+            self._size_hint,
+            self._nms,
+            self._nms_iou,
+            self._run_button,
+            self._progress_bar,
+        ]
+
         # append into/extend the container with your widgets
-        self.extend(
-            [
-                self._image_layer_combo,
-                self._server,
-                self._threshold,
-                self._size_hint,
-                self._nms,
-                self._nms_iou,
-                self._run_button,
-                self._progress_bar,
-            ]
-        )
+        self.extend(self._elements)
+
+    def snapshot(self):
+        return {w.label: w.value for w in self._elements}
 
     def run(self):
         from ._grpc import grpc_call
+
+        name = self._image_layer_combo.value.name + "_label"
 
         self._run_button.enabled = False
         self._run_button.visible = False
@@ -92,15 +101,19 @@ class BiopbImageWidget(Container):
         self._progress_bar.visible = True
         self._progress_bar.value = 0
 
-        image_layer = self._image_layer_combo.value
-        name = image_layer.name + "_label"
+        try:
+            labels = grpc_call(self)
 
-        labels = grpc_call(self)
+            if name in self._viewer.layers:
+                self._viewer.layers[name].data = labels
+            else:
+                self._viewer.add_labels(labels, name=name)
 
-        if name in self._viewer.layers:
-            self._viewer.layers[name].data = labels
-        else:
-            self._viewer.add_labels(labels, name=name)
+        except RpcError as err:
+            print(err)
+            # print(err.details())
+        # except Exception as all_err:
+        #     print(all_err)
 
         self._progress_bar.visible = False
         self._run_button.enabled = True
