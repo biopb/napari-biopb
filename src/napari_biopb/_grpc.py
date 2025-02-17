@@ -1,13 +1,72 @@
+import logging
 from typing import Generator
 
 import biopb.image as proto
 import cv2
 import grpc
 import numpy as np
+
 from napari.qt.threading import thread_worker
+from biopb.image.utils import serialize_from_numpy
+
+logger = logging.getLogger(__name__)
+
+def _box_intersection(boxes_a, boxes_b):
+    """Compute pairwise intersection areas between boxes.
+
+    Args:
+      boxes_a: [..., N, 2d]
+      boxes_b: [..., M, 2d]
+
+    Returns:
+      a float Tensor with shape [..., N, M] representing pairwise intersections.
+    """
+    from numpy import minimum, maximum
+
+    ndim = boxes_a.shape[-1] // 2
+    assert ndim * 2 == boxes_a.shape[-1]
+    assert ndim * 2 == boxes_b.shape[-1]
+
+    min_vals_1 = boxes_a[..., None, :ndim] # [..., N, 1, d]
+    max_vals_1 = boxes_a[..., None, ndim:]
+    min_vals_2 = boxes_b[..., None, :, :ndim] # [..., 1, M, d]
+    max_vals_2 = boxes_b[..., None, :, ndim:]
+
+    min_max = minimum(max_vals_1, max_vals_2) #[..., N, M, d]
+    max_min = maximum(min_vals_1, min_vals_2)
+
+    intersects = maximum(0, min_max - max_min) # [..., N, M, d]
+
+    return intersects.prod(axis=-1)
 
 
-def _build_request(image: np.ndarray, values: dict) -> proto.DetectionRequest:
+def _filter_boxes(boxes, threshold=0.75):
+    """Filter boxes based on the overlap. For each box, check if it is mostly enclosed by another box. If so, remove it.
+
+    Args:
+      boxes: [N, 4/6]
+      threshold: float
+
+    Returns:
+      a boolean tensor with shape [N]
+    """
+    areas = (boxes[..., 2] - boxes[..., 0]) * (boxes[..., 3] - boxes[..., 1])
+    intersections = _box_intersection(boxes, boxes)  #[..., N, N]
+
+    its_area_ratio = intersections / (areas[..., None] + 1e-6)
+    np.fill_diagonal(its_area_ratio, 0)
+
+    # scan from the lowest score
+    bm = np.ones([its_area_ratio.shape[-1]], dtype=bool)
+    for i in range(its_area_ratio.shape[-1]-1, -1, -1):
+        if np.any(its_area_ratio[i] > threshold):
+            bm[i] = False
+            its_area_ratio[..., i] = 0
+
+    return bm
+
+
+def _build_request(image: np.ndarray, settings: dict) -> proto.DetectionRequest:
     """Serialize a np image array as ImageData protobuf"""
     assert (
         image.ndim == 3 or image.ndim == 4
@@ -16,44 +75,30 @@ def _build_request(image: np.ndarray, values: dict) -> proto.DetectionRequest:
     if image.ndim == 3:
         image = image[None, ...]
 
-    print(image.shape)
-    dt_str = image.dtype.str
-
-    image_data = proto.ImageData(
-        pixels=proto.Pixels(
-            bindata=proto.BinData(
-                data=image.tobytes(),
-                endianness=1 if dt_str[0] == "<" else 0,
-            ),
-            size_c=image.shape[-1],
-            size_x=image.shape[-2],
-            size_y=image.shape[-3],
-            size_z=image.shape[-4],
-            physical_size_x=values["Pixel Size X"],
-            physical_size_y=values["Pixel Size Y"],
-            physical_size_z=values["Pixel Size Z"],
-            dimension_order="CXYZT",
-            dtype=dt_str,
-        ),
+    pixels = serialize_from_numpy(
+        image,
+        physical_size_x=1.0,
+        physical_size_y=1.0,
+        physical_size_z=settings["Z Aspect Ratio"],
     )
 
     request = proto.DetectionRequest(
-        image_data=image_data,
-        detection_settings=_get_settings(values),
+        image_data=proto.ImageData(pixels=pixels),
+        detection_settings=_get_detection_settings(settings),
     )
 
     return request
 
 
-def _get_channel(values: dict):
-    server_url = values["Server"]
+def _get_channel(settings: dict):
+    server_url = settings["Server"]
     if ":" in server_url:
         _, port = server_url.split(":")
     else:
         server_url += ":443"
         port = 443
 
-    scheme = values["Scheme"]
+    scheme = settings["Scheme"]
     if scheme == "Auto":
         scheme = "HTTPS" if port == 443 else "HTTP"
     if scheme == "HTTPS":
@@ -69,7 +114,7 @@ def _get_channel(values: dict):
         )
 
 
-def _get_settings(values: dict):
+def _get_detection_settings(settings: dict):
     nms_values = {
         "Off": 0.0,
         "Iou-0.2": 0.2,
@@ -77,35 +122,46 @@ def _get_settings(values: dict):
         "Iou-0.6": 0.6,
         "Iou-0.8": 0.8,
     }
-    nms_iou = nms_values[values["NMS"]]
+    nms_iou = nms_values[settings["NMS"]]
 
     return proto.DetectionSettings(
-        min_score=values["Min Score"],
+        min_score=settings["Min Score"],
         nms_iou=nms_iou,
-        cell_diameter_hint=values["Size Hint"],
+        cell_diameter_hint=settings["Size Hint"],
     )
 
 
-def _render_meshes(response, label):
+def _render_meshes(response, label, post_process=False):
     from vedo import Mesh
 
+    if post_process:
+        bboxes = []
+        for det in response.detections:
+            x = [v.x for v in det.roi.mesh.verts]
+            y = [v.y for v in det.roi.mesh.verts]
+            z = [v.z for v in det.roi.mesh.verts]
+            bboxes.append([min(z), min(y), min(x), max(z), max(y), max(z)])
+
+        bm = _filter_boxes(np.array(bboxes))
+    
+    else:
+        bm = [True] * len(response.detections)
+
     meshes = []
-    for det in response.detections:
-        verts, cells = [], []
-
-        for vert in det.roi.mesh.verts:
-            verts.append(
-                [
-                    vert.z,
-                    vert.y,
-                    vert.x,
-                ]
-            )
-
-        for face in det.roi.mesh.faces:
-            cells.append([face.p1, face.p2, face.p3])
-
-        meshes.append(Mesh([verts, cells]))
+    for det, selected in zip(response.detections, bm):
+        if selected:
+            verts, cells = [], []
+            for vert in det.roi.mesh.verts:
+                verts.append(
+                    [
+                        vert.z,
+                        vert.y,
+                        vert.x,
+                    ]
+                )
+            for face in det.roi.mesh.faces:
+                cells.append([face.p1, face.p2, face.p3])
+            meshes.append(Mesh([verts, cells]))
 
     color = 1
     for mesh in meshes[::-1]:
@@ -135,15 +191,41 @@ def _render_meshes(response, label):
     return label
 
 
-def _generate_label(response, label) -> np.ndarray:
-    if label.ndim == 2:
-        for k, det in enumerate(response.detections):
-            polygon = [[p.x, p.y] for p in det.roi.polygon.points]
-            polygon = np.round(np.array(polygon)).astype(int)
+def _render_polygons(response, label, *, post_process=False):
+    if post_process:
+        # get bboxes
+        bboxes = []
+        for det in response.detections:
+            if det.roi.HasField("polygon"):
+                x = [p.x for p in det.roi.polygon.points]
+                y = [p.y for p in det.roi.polygon.points]
+                bboxes.append([min(y), min(x), max(y), max(x)])
+        
+        bm = _filter_boxes(np.array(bboxes))
 
-            cv2.fillPoly(label, [polygon], k + 1)
+        detections = [det for det, selected in zip(response.detections, bm) if selected]
+
+    else:
+        detections = response.detections
+
+    c = len(detections)
+    for det in reversed(detections):
+        polygon = [[p.x, p.y] for p in det.roi.polygon.points]
+        polygon = np.round(np.array(polygon)).astype(int)
+
+        cv2.fillPoly(label, [polygon], c)
+        c = c - 1
+
+    return label
+
+
+def _generate_label(response, label, *, post_process=False):
+    if label.ndim == 2:
+        _render_polygons(response, label, post_process=post_process)
+
     elif label.ndim == 3:
-        _render_meshes(response, label)
+        _render_meshes(response, label, post_process=post_process)
+
     else:
         raise ValueError(
             f"supplied label template is not 2d or 3d: {label.shape}"
@@ -152,9 +234,22 @@ def _generate_label(response, label) -> np.ndarray:
     return label
 
 
+def _adjust_response_offset(response, grid):
+    for det in response.detections:
+        for p in det.roi.polygon.points:
+            p.x += grid[1].start
+            p.y += grid[0].start
+        for v in det.roi.mesh.verts:
+            v.x += grid[2].start
+            v.y += grid[1].start
+            v.z += grid[0].start
+
+    return response
+
+
 @thread_worker
 def grpc_call(
-    image_data: np.ndarray, settings: dict
+    image_data: np.ndarray, settings: dict, grid_positions: list,
 ) -> Generator[np.ndarray, None, None]:
     is3d = settings["3D"]
     if is3d:
@@ -162,18 +257,36 @@ def grpc_call(
     else:
         assert image_data.ndim == 5
 
+    # grid_positions = _get_grid_positions(image_data[0], settings)
+    # progress_bar.max = len(dataset) * len(grid_positions)
+
     # call server
     with _get_channel(settings) as channel:
         stub = proto.ObjectDetectionStub(channel)
 
         for image in image_data:
-            request = _build_request(image, settings)
+            # start with an empty response
+            response = proto.DetectionResponse()
 
-            timeout = 300 if is3d else 5
+            for grid in grid_positions:
+                logger.info(f"patch position {grid}")
 
-            response = stub.RunDetection(request, timeout=timeout)
+                patch = image.__getitem__(grid)
 
-            print(f"Detected {len(response.detections)} cells")
+                patch_response = stub.RunDetection(
+                    _build_request(patch, settings), 
+                    timeout=300 if settings["3D"] else 5,
+                )
+
+                patch_response = _adjust_response_offset(patch_response, grid)
+
+                logger.info(f"Detected {len(patch_response.detections)} cells in patch")
+                
+                response.MergeFrom(patch_response)
+
+                yield
+
+            logger.info(f"Detected {len(response.detections)} cells in image")
 
             yield _generate_label(
                 response, np.zeros(image_data.shape[1:-1], dtype="uint16")

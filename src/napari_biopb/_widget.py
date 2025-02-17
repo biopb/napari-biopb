@@ -46,7 +46,7 @@ class BiopbImageWidget(Container):
         self._use_advanced.changed.connect(self._activte_advanced_inputs)
 
         self._size_hint = create_widget(
-            value=35.0,
+            value=32.0,
             label="Size Hint",
             annotation=float,
             widget_type="FloatSlider",
@@ -60,22 +60,24 @@ class BiopbImageWidget(Container):
             visible=False,
         )
 
-        self._pixel_size_x = create_widget(
+        self._aspect_ratio = create_widget(
             value=1.0,
-            label="Pixel Size X",
+            label="Z Aspect Ratio",
             options={"visible": False},
         )
 
-        self._pixel_size_y = create_widget(
-            value=1.0,
-            label="Pixel Size Y",
-            options={"visible": False},
+        self._grid_size = ComboBox(
+            value=1024,
+            choices=[512, 768, 1024, 2048],
+            label="Grid Size",
+            visible=False,
         )
 
-        self._pixel_size_z = create_widget(
-            value=1.0,
-            label="Pixel Size Z",
-            options={"visible": False},
+        self._grid_size_3d = ComboBox(
+            value=256,
+            choices=[256, 384, 512],
+            label="Grid Size 3D",
+            visible=False,
         )
 
         self._scheme = ComboBox(
@@ -106,9 +108,9 @@ class BiopbImageWidget(Container):
             self._use_advanced,
             self._size_hint,
             self._nms,
-            self._pixel_size_x,
-            self._pixel_size_y,
-            self._pixel_size_z,
+            self._aspect_ratio,
+            self._grid_size,
+            self._grid_size_3d,
             self._scheme,
             self._progress_bar,
             self._cancel_button,
@@ -122,47 +124,82 @@ class BiopbImageWidget(Container):
         for ctl in [
             self._size_hint,
             self._nms,
-            self._pixel_size_x,
-            self._pixel_size_y,
-            self._pixel_size_z,
+            self._aspect_ratio,
+            self._grid_size,
+            self._grid_size_3d,
             self._scheme,
         ]:
             ctl.visible = self._use_advanced.value
 
-    def snapshot(self):
+    def _get_grid_positions(self, image, settings):
+        if settings["3D"]:
+            gs_ = int(settings["Grid Size 3D"])
+            ss_ = max(gs_ - int(settings["Size Hint"] * 2), 192)
+            ratio = settings["Z Aspect Ratio"]
+            pos_pars = (
+                image.shape[:-1],
+                (int(gs_ / ratio), gs_, gs_),
+                (int(ss_ / ratio), ss_, ss_),
+            )
+        else:
+            gs_ = int(settings["Grid Size"])
+            ss_ = gs_ - int(settings["Size Hint"] * 2)
+            pos_pars = (
+                image.shape[:-1],
+                (gs_, gs_),
+                (ss_, ss_),
+            )
+
+        grid_start = [slice(0, max(d-(gs-ss), 1), ss) for d, gs, ss in zip(*pos_pars)]
+        grid_start = np.moveaxis(np.mgrid[grid_start], 0, -1)
+        grid_start = grid_start.reshape(-1, image.ndim - 1)
+
+        grids = []
+        for x in grid_start:
+            slc = (slice(x[i], x[i] + gs) for i, gs in enumerate(pos_pars[1]))
+            grids.append(tuple(slc))
+
+        return grids
+
+
+    def _snapshot(self):
         return {w.label: w.value for w in self._elements}
+
 
     def run(self):
         from ._grpc import grpc_call
 
         name = self._image_layer_combo.value.name + "_label"
 
-        settings = self.snapshot()
-        progress_bar = self._progress_bar
-
-        # proprocess
+        settings = self._snapshot()
         image_layer = settings["Image"]
         image_data = image_layer.data
-        is3d = settings["3D"]
-        labels = []
 
         if image_layer.rgb:
-            img_dim = image_data.shape[-4:] if is3d else image_data.shape[-3:]
+            img_dim = image_data.shape[-4:] if settings["3D"] else image_data.shape[-3:]
             image_data = image_data.reshape((-1,) + img_dim)
         else:
-            img_dim = image_data.shape[-3:] if is3d else image_data.shape[-2:]
+            img_dim = image_data.shape[-3:] if settings["3D"] else image_data.shape[-2:]
             image_data = image_data.reshape((-1,) + img_dim + (1,))
 
-        progress_bar.max = len(image_data)
+        grid_positions = self._get_grid_positions(image_data[0], settings)
+        self._progress_bar.max = len(image_data) * len(grid_positions)
+
+        labels = np.zeros_like(image_data, dtype="int16")
+        self.n_results = 0
 
         def _update(value):
-            labels.append(value)
-            progress_bar.increment()
+            if value is None: # patch prediction
+                self._progress_bar.increment()
 
-            if name in self._viewer.layers:
-                self._viewer.layers[name].data = np.stack(labels)
-            else:
-                self._viewer.add_labels(np.stack(labels), name=name)
+            else: # full image prediction
+                labels[self.n_results, ...] = value
+                self.n_results += 1
+
+                if name in self._viewer.layers:
+                    self._viewer.layers[name].data = labels
+                else:
+                    self._viewer.add_labels(labels, name=name)
 
         def _cleanup():
             self._progress_bar.visible = False
@@ -187,7 +224,8 @@ class BiopbImageWidget(Container):
         self._cancel_button.visible = True
         self._cancel_button.clicked.connect(_cancel)
 
-        worker = grpc_call(image_data, settings)
+        worker = grpc_call(image_data, settings, grid_positions)
+
         worker.yielded.connect(_update)
         worker.finished.connect(_cleanup)
         worker.errored.connect(_error)
