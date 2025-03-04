@@ -1,9 +1,11 @@
+from typing import Generator
+
 import biopb.image as proto
 import cv2
 import grpc
 import numpy as np
 
-from ._widget import BiopbImageWidget
+from napari.qt.threading import thread_worker
 
 
 def _build_request(image: np.ndarray, values: dict) -> proto.DetectionRequest:
@@ -93,6 +95,7 @@ def _render_meshes(response, label):
     meshes = []
     for det in response.detections:
         verts, cells = [], []
+
         for vert in det.roi.mesh.verts:
             verts.append(
                 [
@@ -101,21 +104,28 @@ def _render_meshes(response, label):
                     vert.x,
                 ]
             )
+
         for face in det.roi.mesh.faces:
             cells.append([face.p1, face.p2, face.p3])
+
         meshes.append(Mesh([verts, cells]))
 
-    for k, mesh in reversed(list(enumerate(meshes))):
+    color = 1
+    for mesh in meshes[::-1]:
         origin = np.floor(mesh.bounds()[::2]).astype(int)
         origin = np.maximum(origin, 0)
+
         max_size = np.array(label.shape) - origin
+
         vol = mesh.binarize(
-            values=(k + 1, 0),
+            values=(color, 0),
             spacing=[1, 1, 1],
             origin=origin + 0.5,
         )
+
         vol_d = vol.tonumpy()[: max_size[0], : max_size[1], : max_size[2]]
         size = tuple(vol_d.shape)
+
         region = label[
             origin[0] : origin[0] + size[0],
             origin[1] : origin[1] + size[1],
@@ -123,10 +133,12 @@ def _render_meshes(response, label):
         ]
         region[...] = np.maximum(region, vol_d)
 
+        color = color + 1
+
     return label
 
 
-def _generate_label(response, label):
+def _generate_label(response, label)-> np.ndarray:
     if label.ndim == 2:
         for k, det in enumerate(response.detections):
             polygon = [[p.x, p.y] for p in det.roi.polygon.points]
@@ -143,33 +155,20 @@ def _generate_label(response, label):
     return label
 
 
-def grpc_call(widget: BiopbImageWidget) -> np.ndarray:
-    """make grpc call based on current widget values"""
-    widget_values = widget.snapshot()
-    progress_bar = widget._progress_bar
-
-    image_layer = widget_values["Image"]
-    image_data = image_layer.data
-    is3d = widget_values["3D"]
-
-    # proprocess
-    if image_layer.rgb:
-        img_dim = image_data.shape[-4:] if is3d else image_data.shape[-3:]
-        image_data = image_data.reshape((-1,) + img_dim)
+@thread_worker
+def grpc_call(image_data: np.ndarray, settings: dict) -> Generator[np.ndarray, None, None]:
+    is3d = settings["3D"]
+    if is3d:
+        assert image_data.ndim == 5
     else:
-        img_dim = image_data.shape[-3:] if is3d else image_data.shape[-2:]
-        image_data = image_data.reshape((-1,) + img_dim + (1,))
-
-    assert image_data.ndim == 4 or image_data.ndim == 5
-    progress_bar.max = len(image_data)
+        assert image_data.ndim == 5
 
     # call server
-    with _get_channel(widget_values) as channel:
+    with _get_channel(settings) as channel:
         stub = proto.ObjectDetectionStub(channel)
 
-        labels = []
         for image in image_data:
-            request = _build_request(image, widget_values)
+            request = _build_request(image, settings)
 
             timeout = 300 if is3d else 5
 
@@ -177,16 +176,7 @@ def grpc_call(widget: BiopbImageWidget) -> np.ndarray:
 
             print(f"Detected {len(response.detections)} cells")
 
-            labels.append(
-                _generate_label(
-                    response, np.zeros(image_data.shape[1:-1], dtype="uint16")
-                )
+            yield _generate_label(
+                response, np.zeros(image_data.shape[1:-1], dtype="uint16")
             )
-            progress_bar.increment()
 
-    if image_layer.rgb:
-        labels = np.reshape(labels, image_layer.data.shape[:-1])
-    else:
-        labels = np.reshape(labels, image_layer.data.shape)
-
-    return labels

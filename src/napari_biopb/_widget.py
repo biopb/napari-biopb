@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING
 
+import numpy as np
+    
 from grpc import RpcError
 from magicgui.widgets import ComboBox, Container, ProgressBar, create_widget
 
@@ -87,12 +89,15 @@ class BiopbImageWidget(Container):
             visible=False,
         )
 
-        self._run_button = create_widget(label="Run", widget_type="Button")
-        self._run_button.changed.connect(self.run)
-
         self._progress_bar = ProgressBar(
-            label="Running", value=0, step=1, visible=False
+            label="Running...", value=0, step=1, visible=False
         )
+
+        self._cancel_button = create_widget(label="Cancel", widget_type="Button")
+        self._cancel_button.visible = False
+
+        self._run_button = create_widget(label="Run", widget_type="Button")
+        self._run_button.clicked.connect(self.run)
 
         self._elements = [
             self._image_layer_combo,
@@ -107,8 +112,9 @@ class BiopbImageWidget(Container):
             self._pixel_size_y,
             self._pixel_size_z,
             self._scheme,
-            self._run_button,
             self._progress_bar,
+            self._cancel_button,
+            self._run_button,
         ]
 
         # append into/extend the container with your widgets
@@ -133,26 +139,59 @@ class BiopbImageWidget(Container):
 
         name = self._image_layer_combo.value.name + "_label"
 
-        self._run_button.enabled = False
-        self._run_button.visible = False
+        settings = self.snapshot()
+        progress_bar = self._progress_bar
+
+        # proprocess
+        image_layer = settings["Image"]
+        image_data = image_layer.data
+        is3d = settings["3D"]
+        labels = []
+
+        if image_layer.rgb:
+            img_dim = image_data.shape[-4:] if is3d else image_data.shape[-3:]
+            image_data = image_data.reshape((-1,) + img_dim)
+        else:
+            img_dim = image_data.shape[-3:] if is3d else image_data.shape[-2:]
+            image_data = image_data.reshape((-1,) + img_dim + (1,))
+
+        progress_bar.max = len(image_data)
+        
+        def _update(value):
+            labels.append(value)
+            progress_bar.increment()
+
+            if name in self._viewer.layers:
+                self._viewer.layers[name].data = np.stack(labels)
+            else:
+                self._viewer.add_labels(np.stack(labels), name=name)
+        
+        def _cleanup():
+            self._progress_bar.visible = False
+            self._run_button.visible = True
+            self._run_button.enabled = True
+            self._cancel_button.visible = False
+        
+        def _error(exc):
+            _cleanup()
+            raise exc
+        
+        def _cancel():
+            worker.quit()
+            _cleanup()
 
         self._progress_bar.visible = True
         self._progress_bar.value = 0
 
-        try:
-            labels = grpc_call(self)
+        self._run_button.enabled = False
+        self._run_button.visible= False
 
-            if name in self._viewer.layers:
-                self._viewer.layers[name].data = labels
-            else:
-                self._viewer.add_labels(labels, name=name)
+        self._cancel_button.visible = True
+        self._cancel_button.clicked.connect(_cancel)
 
-        except RpcError as err:
-            print(err)
-            # print(err.details())
-        # except Exception as all_err:
-        #     print(all_err)
+        worker = grpc_call(image_data, settings)
+        worker.yielded.connect(_update)
+        worker.finished.connect(_cleanup)
+        worker.errored.connect(_error)
 
-        self._progress_bar.visible = False
-        self._run_button.enabled = True
-        self._run_button.visible = True
+        worker.start()
