@@ -1,7 +1,7 @@
 [project]
 name = "napari-biopb"
 dynamic = ["version"]
-description = "Performing single-cell segmentation by visiting biopb endpoints"
+description = "Performing image analysis by visiting biopb endpoints"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
