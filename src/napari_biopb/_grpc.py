@@ -4,7 +4,6 @@ import biopb.image as proto
 import cv2
 import grpc
 import numpy as np
-
 from napari.qt.threading import thread_worker
 
 
@@ -16,8 +15,6 @@ def _build_request(image: np.ndarray, values: dict) -> proto.DetectionRequest:
 
     if image.ndim == 3:
         image = image[None, ...]
-
-    # image = np.ascontiguousarray(image, ">f2")
 
     print(image.shape)
     dt_str = image.dtype.str
@@ -138,7 +135,7 @@ def _render_meshes(response, label):
     return label
 
 
-def _generate_label(response, label)-> np.ndarray:
+def _generate_label(response, label) -> np.ndarray:
     if label.ndim == 2:
         for k, det in enumerate(response.detections):
             polygon = [[p.x, p.y] for p in det.roi.polygon.points]
@@ -156,7 +153,9 @@ def _generate_label(response, label)-> np.ndarray:
 
 
 @thread_worker
-def grpc_call(image_data: np.ndarray, settings: dict) -> Generator[np.ndarray, None, None]:
+def grpc_call(
+    image_data: np.ndarray, settings: dict
+) -> Generator[np.ndarray, None, None]:
     is3d = settings["3D"]
     if is3d:
         assert image_data.ndim == 5
@@ -179,4 +178,3 @@ def grpc_call(image_data: np.ndarray, settings: dict) -> Generator[np.ndarray, N
             yield _generate_label(
                 response, np.zeros(image_data.shape[1:-1], dtype="uint16")
             )
-

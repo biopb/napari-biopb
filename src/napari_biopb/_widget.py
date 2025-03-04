@@ -1,16 +1,12 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
-    
-from grpc import RpcError
 from magicgui.widgets import ComboBox, Container, ProgressBar, create_widget
 
 if TYPE_CHECKING:
     import napari
 
 
-# if we want even more control over our widget, we can use
-# magicgui `Container`
 class BiopbImageWidget(Container):
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__()
@@ -93,7 +89,9 @@ class BiopbImageWidget(Container):
             label="Running...", value=0, step=1, visible=False
         )
 
-        self._cancel_button = create_widget(label="Cancel", widget_type="Button")
+        self._cancel_button = create_widget(
+            label="Cancel", widget_type="Button"
+        )
         self._cancel_button.visible = False
 
         self._run_button = create_widget(label="Run", widget_type="Button")
@@ -156,7 +154,7 @@ class BiopbImageWidget(Container):
             image_data = image_data.reshape((-1,) + img_dim + (1,))
 
         progress_bar.max = len(image_data)
-        
+
         def _update(value):
             labels.append(value)
             progress_bar.increment()
@@ -165,17 +163,17 @@ class BiopbImageWidget(Container):
                 self._viewer.layers[name].data = np.stack(labels)
             else:
                 self._viewer.add_labels(np.stack(labels), name=name)
-        
+
         def _cleanup():
             self._progress_bar.visible = False
             self._run_button.visible = True
             self._run_button.enabled = True
             self._cancel_button.visible = False
-        
+
         def _error(exc):
             _cleanup()
             raise exc
-        
+
         def _cancel():
             worker.quit()
             _cleanup()
@@ -184,7 +182,7 @@ class BiopbImageWidget(Container):
         self._progress_bar.value = 0
 
         self._run_button.enabled = False
-        self._run_button.visible= False
+        self._run_button.visible = False
 
         self._cancel_button.visible = True
         self._cancel_button.clicked.connect(_cancel)
