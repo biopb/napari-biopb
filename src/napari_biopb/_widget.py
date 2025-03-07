@@ -8,6 +8,8 @@ if TYPE_CHECKING:
 
 
 class BiopbImageWidget(Container):
+    """napari plugin widget for accessing biopb endpoints"""
+
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__()
         self._viewer = viewer
@@ -46,7 +48,7 @@ class BiopbImageWidget(Container):
         self._use_advanced.changed.connect(self._activte_advanced_inputs)
 
         self._size_hint = create_widget(
-            value=35.0,
+            value=32.0,
             label="Size Hint",
             annotation=float,
             widget_type="FloatSlider",
@@ -140,20 +142,14 @@ class BiopbImageWidget(Container):
         settings = self.snapshot()
         progress_bar = self._progress_bar
 
-        # proprocess
-        image_layer = settings["Image"]
-        image_data = image_layer.data
         is3d = settings["3D"]
         labels = []
 
-        if image_layer.rgb:
-            img_dim = image_data.shape[-4:] if is3d else image_data.shape[-3:]
-            image_data = image_data.reshape((-1,) + img_dim)
-        else:
-            img_dim = image_data.shape[-3:] if is3d else image_data.shape[-2:]
-            image_data = image_data.reshape((-1,) + img_dim + (1,))
-
-        progress_bar.max = len(image_data)
+        # pre-process
+        image_layer = settings["Image"]
+        image_data = image_layer.data
+        if image_layer.multiscale:
+            image_data = image_data[0]
 
         def _update(value):
             labels.append(value)
@@ -176,20 +172,38 @@ class BiopbImageWidget(Container):
 
         def _cancel():
             worker.quit()
+            self._cancel_button.enabled = False
+            worker.await_workers()
             _cleanup()
 
-        self._progress_bar.visible = True
-        self._progress_bar.value = 0
+        with image_layer.dask_optimized_slicing():
+            if image_layer.rgb:
+                img_dim = (
+                    image_data.shape[-4:] if is3d else image_data.shape[-3:]
+                )
+                image_data = image_data.reshape((-1,) + img_dim)
+            else:
+                img_dim = (
+                    image_data.shape[-3:] if is3d else image_data.shape[-2:]
+                )
+                image_data = image_data.reshape((-1,) + img_dim + (1,))
 
-        self._run_button.enabled = False
-        self._run_button.visible = False
+            progress_bar.max = len(image_data)
 
-        self._cancel_button.visible = True
-        self._cancel_button.clicked.connect(_cancel)
+            self._progress_bar.visible = True
+            self._progress_bar.value = 0
 
-        worker = grpc_call(image_data, settings)
-        worker.yielded.connect(_update)
-        worker.finished.connect(_cleanup)
-        worker.errored.connect(_error)
+            self._run_button.enabled = False
+            self._run_button.visible = False
 
-        worker.start()
+            self._cancel_button.enabled = True
+            self._cancel_button.visible = True
+            self._cancel_button.clicked.connect(_cancel)
+
+            worker = grpc_call(image_data, settings)
+
+            worker.yielded.connect(_update)
+            worker.finished.connect(_cleanup)
+            worker.errored.connect(_error)
+
+            worker.start()

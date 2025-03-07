@@ -6,6 +6,8 @@ import grpc
 import numpy as np
 from napari.qt.threading import thread_worker
 
+from ._typing import napari_data
+
 
 def _build_request(image: np.ndarray, values: dict) -> proto.DetectionRequest:
     """Serialize a np image array as ImageData protobuf"""
@@ -154,22 +156,22 @@ def _generate_label(response, label) -> np.ndarray:
 
 @thread_worker
 def grpc_call(
-    image_data: np.ndarray, settings: dict
+    image_data: napari_data, settings: dict
 ) -> Generator[np.ndarray, None, None]:
     is3d = settings["3D"]
     if is3d:
         assert image_data.ndim == 5
     else:
-        assert image_data.ndim == 5
+        assert image_data.ndim == 4
 
     # call server
     with _get_channel(settings) as channel:
         stub = proto.ObjectDetectionStub(channel)
 
         for image in image_data:
-            request = _build_request(image, settings)
+            request = _build_request(np.array(image), settings)
 
-            timeout = 300 if is3d else 5
+            timeout = 300 if is3d else 15
 
             response = stub.RunDetection(request, timeout=timeout)
 
