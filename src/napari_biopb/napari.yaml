@@ -1,13 +1,19 @@
 name: napari-biopb
-display_name: single-cell segmentation
+display_name: BioPB
 visibility: public
 # see https://napari.org/stable/plugins/technical_references/manifest.html#fields for valid categories
-categories: ["Annotation", "Segmentation"]
+categories: ["Annotation", "Segmentation", "Image Processing"]
 contributions:
   commands:
-    - id: napari-biopb.make_biopb_image_widget
-      python_name: napari_biopb:BiopbImageWidget
-      title: BioPB Plugin
+    - id: napari-biopb.make_object_detection_widget
+      python_name: napari_biopb:ObjectDetectionWidget
+      title: Object Detection
+    - id: napari-biopb.make_image_processing_widget
+      python_name: napari_biopb:ImageProcessingWidget
+      title: Image Processing
   widgets:
-    - command: napari-biopb.make_biopb_image_widget
-      display_name: BioPB
+    - command: napari-biopb.make_object_detection_widget
+      display_name: Object Detection
+    - command: napari-biopb.make_image_processing_widget
+      display_name: Image Processing
+    #   autogenerate: true

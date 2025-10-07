@@ -5,7 +5,7 @@ import biopb.image as proto
 import cv2
 import grpc
 import numpy as np
-from biopb.image.utils import serialize_from_numpy
+from biopb.image.utils import deserialize_to_numpy, serialize_from_numpy
 from napari.qt.threading import thread_worker
 
 from ._typing import napari_data
@@ -68,10 +68,7 @@ def _filter_boxes(boxes, threshold=0.75):
     return bm
 
 
-def _build_request(
-    image: np.ndarray, settings: dict
-) -> proto.DetectionRequest:
-    """Serialize a np image array as ImageData protobuf"""
+def _encode_image(image: np.ndarray, z_ratio=1.0):
     assert (
         image.ndim == 3 or image.ndim == 4
     ), f"image received is neither 2D nor 3D, shape={image.shape}."
@@ -83,8 +80,17 @@ def _build_request(
         image,
         physical_size_x=1.0,
         physical_size_y=1.0,
-        physical_size_z=settings["Z Aspect Ratio"],
+        physical_size_z=z_ratio,
     )
+
+    return pixels
+
+
+def _object_detection_build_request(
+    image: np.ndarray, settings: dict
+) -> proto.DetectionRequest:
+    """Serialize a np image array as ImageData protobuf"""
+    pixels = _encode_image(image, settings["Z Aspect Ratio"])
 
     request = proto.DetectionRequest(
         image_data=proto.ImageData(pixels=pixels),
@@ -94,7 +100,7 @@ def _build_request(
     return request
 
 
-def _get_channel(settings: dict):
+def _get_grpc_channel(settings: dict):
     server_url = settings["Server"]
     if ":" in server_url:
         _, port = server_url.split(":")
@@ -254,7 +260,7 @@ def _adjust_response_offset(response, grid):
 
 
 @thread_worker
-def grpc_call(
+def grpc_object_detection(
     image_data: napari_data,
     settings: dict,
     grid_positions: list,
@@ -266,7 +272,7 @@ def grpc_call(
         assert image_data.ndim == 4
 
     # call server
-    with _get_channel(settings) as channel:
+    with _get_grpc_channel(settings) as channel:
         stub = proto.ObjectDetectionStub(channel)
 
         for image in image_data:
@@ -274,27 +280,64 @@ def grpc_call(
             response = proto.DetectionResponse()
 
             for grid in grid_positions:
-                logger.info("patch position {}".format(grid))
+                logger.info(f"patch position {grid}")
 
                 patch = np.array(image.__getitem__(grid))
 
                 patch_response = stub.RunDetection(
-                    _build_request(patch, settings),
+                    _object_detection_build_request(patch, settings),
                     timeout=300 if settings["3D"] else 15,
                 )
 
                 patch_response = _adjust_response_offset(patch_response, grid)
 
                 logger.info(
-                    "Detected {} cells in patch".format(len(patch_response.detections))
+                    f"Detected {len(patch_response.detections)} cells in patch"
                 )
 
                 response.MergeFrom(patch_response)
 
                 yield
 
-            logger.info("Detected {} cells in image".format(len(response.detections)))
+            logger.info(f"Detected {len(response.detections)} cells in image")
 
             yield _generate_label(
                 response, np.zeros(image_data.shape[1:-1], dtype="uint16")
             )
+
+
+@thread_worker
+def grpc_process_image(
+    image_data: napari_data,
+    settings: dict,
+    grid_positions: list | None = None,
+) -> Generator[np.ndarray, None, None]:
+    is3d = settings["3D"]
+    if is3d:
+        assert image_data.ndim == 5
+    else:
+        assert image_data.ndim == 4
+
+    assert (
+        grid_positions is None
+    ), "Grid-processing unimplemented -- try object-detection"
+
+    # call server
+    with _get_grpc_channel(settings) as channel:
+        stub = proto.ProcessImageStub(channel)
+
+        for image in image_data:
+            response = stub.Run(
+                proto.ProcessRequest(
+                    image_data=proto.ImageData(pixels=_encode_image(image))
+                ),
+                timeout=300 if settings["3D"] else 15,
+            )
+
+            output = deserialize_to_numpy(response.image_data.pixels)
+            if output.shape[-1] == 1:
+                output = output.squeeze(-1)
+            if not settings["3D"]:
+                output = output.squeeze(0)
+
+            yield output
