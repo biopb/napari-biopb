@@ -29,7 +29,7 @@ dependencies = [
     "magicgui",
     "qtpy",
     "scikit-image",
-    "biopb",
+    "biopb >= 0.1.3",
     "opencv-python-headless",
     "grpcio_tools",
     "vedo",

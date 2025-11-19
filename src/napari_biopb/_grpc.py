@@ -327,6 +327,7 @@ def grpc_process_image(
         stub = proto.ProcessImageStub(channel)
 
         for image in image_data:
+            image = np.array(image)
             response = stub.Run(
                 proto.ProcessRequest(
                     image_data=proto.ImageData(pixels=_encode_image(image))
@@ -335,8 +336,8 @@ def grpc_process_image(
             )
 
             output = deserialize_to_numpy(response.image_data.pixels)
-            if output.shape[-1] == 1:
-                output = output.squeeze(-1)
+            # if output.shape[-1] == 1:
+            #     output = output.squeeze(-1)
             if not settings["3D"]:
                 output = output.squeeze(0)
 

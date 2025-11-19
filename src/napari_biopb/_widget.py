@@ -115,6 +115,11 @@ class ImageProcessingWidget(_WidgetBase):
         from ._grpc import grpc_process_image
 
         def _update(value):
+            if value.shape[-1] == 1:
+                value = value.squeeze(-1)
+            else:
+                value = np.moveaxis(value, -1, 0)
+
             if self.out_layer is None:
                 name = self._image_layer_combo.value.name + "_label"
                 _output = np.zeros(
