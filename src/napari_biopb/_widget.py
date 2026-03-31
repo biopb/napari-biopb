@@ -8,29 +8,45 @@ if TYPE_CHECKING:
 
 
 class _WidgetBase(Container):
+    """Base class for biopb napari widgets."""
+
     def run(self):
+        """Run the processing workflow."""
         raise NotImplementedError("Subclass must implement 'run' method.")
 
-    def _snapshot(self):
+    def _snapshot(self) -> dict:
+        """Capture current widget settings as a dict."""
         return {w.label: w.value for w in self._elements}
 
     def _cleanup(self):
+        """Reset widget state after processing completes."""
         self._progress_bar.visible = False
         self._run_button.visible = True
         self._run_button.enabled = True
         self._cancel_button.visible = False
 
-    def _error(self, exc):
+        # Disconnect the cancel callback to prevent accumulation
+        if self._cancel_callback is not None:
+            try:
+                self._cancel_button.clicked.disconnect(self._cancel_callback)
+            except TypeError:
+                pass  # Already disconnected
+            self._cancel_callback = None
+
+    def _error(self, exc: Exception):
+        """Handle errors during processing."""
         self._cleanup()
         raise exc
 
     def _cancel(self, worker):
+        """Cancel the running worker."""
         worker.quit()
         self._cancel_button.enabled = False
         worker.await_workers()
         self._cleanup()
 
     def _prepare(self):
+        """Prepare widget state before processing starts."""
         self._progress_bar.visible = True
         self._progress_bar.value = 0
 
@@ -42,7 +58,16 @@ class _WidgetBase(Container):
 
         self.out_layer = None
 
-    def _get_data(self, image_layer, is_3d):
+    def _get_data(self, image_layer, is_3d: bool):
+        """Extract image data from layer, handling multiscale and RGB.
+
+        Args:
+            image_layer: napari Image layer
+            is_3d: whether to treat as 3D data
+
+        Returns:
+            reshaped image array
+        """
         image_data = image_layer.data
         if image_layer.multiscale:
             image_data = image_data[0]
@@ -58,6 +83,7 @@ class _WidgetBase(Container):
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__()
         self._viewer = viewer
+        self._cancel_callback = None
 
         self._image_layer_combo = create_widget(
             label="Image", annotation="napari.layers.Image"
@@ -151,7 +177,8 @@ class ImageProcessingWidget(_WidgetBase):
 
             worker = grpc_process_image(image_data, settings)
 
-            self._cancel_button.clicked.connect(lambda: self._cancel(worker))
+            self._cancel_callback = lambda: self._cancel(worker)
+            self._cancel_button.clicked.connect(self._cancel_callback)
             worker.yielded.connect(_update)
             worker.finished.connect(self._cleanup)
             worker.errored.connect(self._error)
@@ -230,10 +257,22 @@ class ObjectDetectionWidget(_WidgetBase):
         )
 
     def _activte_advanced_inputs(self):
+        """Toggle visibility of advanced settings widgets."""
         for ctl in self._hidden_elements:
             ctl.visible = self._use_advanced.value
 
-    def _get_grid_positions(self, image, settings):
+    def _get_grid_positions(
+        self, image, settings: dict
+    ) -> list[tuple[slice, ...]]:
+        """Compute grid positions for tiled processing.
+
+        Args:
+            image: input image array
+            settings: widget settings dict
+
+        Returns:
+            list of slice tuples defining patch positions
+        """
         if settings["3D"]:
             pos_pars = (
                 image.shape[:-1],
@@ -301,7 +340,8 @@ class ObjectDetectionWidget(_WidgetBase):
                 image_data, settings, grid_positions
             )
 
-            self._cancel_button.clicked.connect(lambda: self._cancel(worker))
+            self._cancel_callback = lambda: self._cancel(worker)
+            self._cancel_button.clicked.connect(self._cancel_callback)
             worker.yielded.connect(_update)
             worker.finished.connect(self._cleanup)
             worker.errored.connect(self._error)

@@ -4,7 +4,7 @@ except ImportError:
     import importlib.metadata
 
     __version__ = importlib.metadata.version("napari-biopb")
-except:
+except Exception:
     __version__ = "unknown"
 
 from ._widget import ImageProcessingWidget, ObjectDetectionWidget

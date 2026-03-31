@@ -69,7 +69,7 @@ where = ["src"]
 
 
 [tool.setuptools_scm]
-write_to = "src/napari_biopb/_version.py"
+version_file = "src/napari_biopb/_version.py"
 
 
 [tool.black]
