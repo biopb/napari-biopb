@@ -1,11 +1,12 @@
 import logging
+import re
 from typing import Generator
 
 import biopb.image as proto
 import grpc
 import numpy as np
 from biopb.image.utils import deserialize_to_numpy, serialize_from_numpy
-from google.protobuf import struct_pb2
+from google.protobuf import empty_pb2, struct_pb2
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 from napari.qt.threading import thread_worker
 
@@ -13,6 +14,41 @@ from ._render import _adjust_response_offset, _generate_label
 from ._typing import napari_data
 
 logger = logging.getLogger(__name__)
+
+# Regex for validating server URL (hostname:port format)
+_SERVER_URL_PATTERN = re.compile(
+    r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?:(\d+)$"
+)
+
+
+def _validate_server_url(server_url: str) -> tuple[str, int]:
+    """Validate and parse server URL into host and port.
+
+    Args:
+        server_url: Server address in format "hostname:port"
+
+    Returns:
+        Tuple of (host, port)
+
+    Raises:
+        ValueError: If URL format is invalid
+    """
+    match = _SERVER_URL_PATTERN.match(server_url)
+    if match:
+        port = int(match.group(1))
+        host = server_url.rsplit(":", 1)[0]
+        return host, port
+
+    # Check if it's a hostname without port (will default to 443)
+    if re.match(
+        r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$",
+        server_url,
+    ):
+        return server_url, 443
+
+    raise ValueError(
+        f"Invalid server URL format: '{server_url}'. Expected 'hostname:port' or 'hostname'"
+    )
 
 
 def dict_to_struct(d: dict) -> struct_pb2.Struct:
@@ -28,10 +64,22 @@ def struct_to_dict(s: struct_pb2.Struct) -> dict:
 
 
 def _encode_image(image: np.ndarray, z_ratio: float = 1.0):
-    """Encode numpy image array to protobuf Pixels format."""
-    assert (
-        image.ndim == 3 or image.ndim == 4
-    ), f"image received is neither 2D nor 3D, shape={image.shape}."
+    """Encode numpy image array to protobuf Pixels format.
+
+    Args:
+        image: Input image array (must be 2D or 3D with channel dimension)
+        z_ratio: Z aspect ratio for 3D images
+
+    Returns:
+        protobuf Pixels object
+
+    Raises:
+        ValueError: If image dimensions are invalid
+    """
+    if image.ndim not in (3, 4):
+        raise ValueError(
+            f"Image must be 2D or 3D with channel dimension. Got shape {image.shape} with {image.ndim} dimensions"
+        )
 
     if image.ndim == 3:
         image = image[None, ...]
@@ -61,13 +109,26 @@ def _object_detection_build_request(
 
 
 def _get_grpc_channel(settings: dict):
-    """Create gRPC channel based on server settings."""
+    """Create gRPC channel based on server settings.
+
+    Args:
+        settings: Widget settings dict with 'Server' and 'Scheme' keys
+
+    Returns:
+        gRPC channel (secure or insecure based on scheme)
+
+    Raises:
+        ValueError: If server URL is invalid
+    """
     server_url = settings["Server"]
-    if ":" in server_url:
-        _, port = server_url.split(":")
-    else:
-        server_url += ":443"
-        port = 443
+
+    try:
+        _, port = _validate_server_url(server_url)
+    except ValueError:
+        # Re-raise with more context
+        raise ValueError(
+            f"Invalid server URL: '{server_url}'. Use format 'hostname:port' (e.g., 'localhost:50051') or 'hostname' (defaults to port 443)"
+        )
 
     scheme = settings["Scheme"]
     if scheme == "Auto":
@@ -102,7 +163,7 @@ def check_server_health(settings: dict, timeout: float = 5.0) -> bool:
             response = stub.Check(request, timeout=timeout)
             return response.status == health_pb2.HealthCheckResponse.SERVING
     except Exception as e:
-        logger.debug("Health check failed: %s", e)
+        logger.debug("Health check failed: %s", e, exc_info=True)
         return False
 
 
@@ -121,7 +182,9 @@ def get_op_names(settings: dict, timeout: float = 10.0) -> proto.OpNames:
     """
     with _get_grpc_channel(settings) as channel:
         stub = proto.ProcessImageStub(channel)
-        response = stub.GetOpNames(proto.GetOpNamesRequest(), timeout=timeout)
+        response = stub.GetOpNames(empty_pb2.Empty(), timeout=timeout)
+        logger.debug("Received %d ops from server", len(response.names))
+
         return response
 
 
@@ -158,12 +221,17 @@ def grpc_object_detection(
 
     Yields:
         None for progress updates, then label array for each image
+
+    Raises:
+        ValueError: If image dimensions don't match expected format
     """
     is3d = settings["3D"]
-    if is3d:
-        assert image_data.ndim == 5
-    else:
-        assert image_data.ndim == 4
+    expected_ndim = 5 if is3d else 4
+    if image_data.ndim != expected_ndim:
+        raise ValueError(
+            f"For {'3D' if is3d else '2D'} mode, image data must have {expected_ndim} dimensions "
+            f"(batch, {'z,' if is3d else ''}y, x, channel). Got shape {image_data.shape} with {image_data.ndim} dimensions"
+        )
 
     server = settings["Server"]
     logger.info("Starting object detection on %s", server)
@@ -219,16 +287,22 @@ def grpc_process_image(
 
     Yields:
         Processed image array for each input image
+
+    Raises:
+        ValueError: If image dimensions don't match expected format or grid_positions is provided
     """
     is3d = settings["3D"]
-    if is3d:
-        assert image_data.ndim == 5
-    else:
-        assert image_data.ndim == 4
+    expected_ndim = 5 if is3d else 4
+    if image_data.ndim != expected_ndim:
+        raise ValueError(
+            f"For {'3D' if is3d else '2D'} mode, image data must have {expected_ndim} dimensions "
+            f"(batch, {'z,' if is3d else ''}y, x, channel). Got shape {image_data.shape} with {image_data.ndim} dimensions"
+        )
 
-    assert (
-        grid_positions is None
-    ), "Grid-processing unimplemented -- try object-detection"
+    if grid_positions is not None:
+        raise ValueError(
+            "Grid processing is not supported for image processing. Use object detection instead."
+        )
 
     server = settings["Server"]
     logger.info("Starting image processing on %s", server)

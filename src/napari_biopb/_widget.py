@@ -14,11 +14,25 @@ from magicgui.widgets import (
     create_widget,
 )
 from qtpy.QtCore import QTimer
+from napari.qt.threading import thread_worker
 
 if TYPE_CHECKING:
     import napari
 
 logger = logging.getLogger(__name__)
+
+
+class _PersistentComboBox(ComboBox):
+    """ComboBox that preserves dynamically set choices during napari state resets."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._choices_initialized = True
+
+    def reset_choices(self):
+        # Skip reset after initial setup to preserve dynamically populated values
+        if not getattr(self, "_choices_initialized", False):
+            super().reset_choices()
 
 
 class _WidgetBase(Container):
@@ -53,10 +67,15 @@ class _WidgetBase(Container):
         logger.error("Processing failed: %s", exc, exc_info=True)
 
     def _cancel(self, worker):
-        """Cancel the running worker."""
+        """Cancel the running worker.
+
+        Args:
+            worker: The thread worker to cancel
+        """
         worker.quit()
         self._cancel_button.enabled = False
-        worker.await_workers()
+        # Wait for worker to finish with timeout to prevent indefinite blocking
+        worker.await_workers(timeout=5.0)
         self._cleanup()
 
     def _prepare(self):
@@ -143,17 +162,23 @@ class ImageProcessingWidget(_WidgetBase):
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__(viewer)
 
+        logger.debug(
+            "Initialized ImageProcessingWidget with server: %s",
+            self._server.value,
+        )
+
         # Op selector for choosing which operation to run
-        self._op_selector = ComboBox(
-            choices=[""],  # Empty initially, populated on server connect
+        self._op_selector = _PersistentComboBox(
+            choices=["<no ops>"],  # Placeholder until populated from server
             label="Op",
+            visible=False,  # Hidden until valid schema is loaded
         )
 
         # Container for dynamically generated kwargs widgets
-        self._kwargs_container = Container(label="Kwargs")
+        self._kwargs_container = Container(label="Kwargs", visible=False)
 
         # Status label for ops connection status
-        self._ops_status = Label(value="", label="Ops Status")
+        self._ops_status = Label(value="Not connected", label="Ops Status")
 
         # Store schemas for each op (populated from GetOpNames response)
         self._op_schemas = {}
@@ -181,14 +206,18 @@ class ImageProcessingWidget(_WidgetBase):
             ]
         )
 
+        # Fetch ops during initialization
+        self._fetch_ops()
+
     def _snapshot(self) -> dict:
         """Capture current widget settings including op and kwargs."""
         settings = super()._snapshot()
-        # Add op selector value
         settings["Op"] = self._op_selector.value
-        # Add kwargs container widgets
         for w in self._kwargs_container:
-            settings[w.label] = w.value
+            value = w.value
+            if isinstance(w, SpinBox):
+                value = int(value)
+            settings[w.label] = value
         return settings
 
     def _fetch_ops(self):
@@ -196,68 +225,71 @@ class ImageProcessingWidget(_WidgetBase):
         from ._grpc import get_op_names
 
         self._ops_status.value = "Fetching..."
+        self._op_selector.visible = False
+        self._kwargs_container.visible = False
         settings = self._snapshot()
 
         def _fetch():
             try:
-                op_names = get_op_names(settings)
-                # Store schemas for each op
-                self._op_schemas = dict(op_names.op_schemas)
-                # Get list of op names
-                op_list = list(op_names.op_names)
-                return op_list
+                ops = get_op_names(settings)
+                return ops
             except Exception as e:
                 logger.debug("Failed to fetch ops: %s", e)
                 return None
 
-        def _on_result(op_list):
-            if op_list is None:
-                self._ops_status.value = "Error: could not fetch ops"
-                self._op_selector.choices = [""]
-            else:
+        def _on_result(result):
+            if result:
+                self._op_schemas = dict(result.op_schemas)
+
+                op_list = list(result.names)
                 self._ops_status.value = f"Connected ({len(op_list)} ops)"
                 self._op_selector.choices = op_list
                 if op_list:
                     self._op_selector.value = op_list[0]
+                    self._op_selector.visible = True
 
-        from napari.qt.threading import thread_worker
+        self._ops_status.value = "No op schema available"
+        self._op_selector.choices = ["<no ops>"]
+        self._op_schemas = {}
+        self._op_selector.visible = False
+        self._kwargs_container.visible = False
 
-        worker = thread_worker(_fetch)
-        worker.returned.connect(_on_result)
-        worker.start()
+        worker = thread_worker(
+            _fetch,
+            start_thread=True,
+            connect={"returned": _on_result},
+        )()
 
     def _on_op_changed(self):
         """Rebuild kwargs widgets when op selection changes."""
         op_name = self._op_selector.value
+        self._clear_kwargs_container()
+
         if not op_name or op_name not in self._op_schemas:
-            self._clear_kwargs_container()
+            self._kwargs_container.visible = False
             return
 
         schema = self._op_schemas[op_name]
-        self._build_kwargs_widgets(schema)
+        has_kwargs = bool(dict(schema.default_kwargs))
+        self._kwargs_container.visible = has_kwargs
+
+        if has_kwargs:
+            default_kwargs = dict(schema.default_kwargs)
+            logger.debug(
+                "Building kwargs widgets for op: %s with kwargs: %s",
+                op_name,
+                default_kwargs,
+            )
+            for key, value in default_kwargs.items():
+                widget = self._create_widget_for_value(key, value)
+                if widget is not None:
+                    self._kwargs_container.append(widget)
 
     def _clear_kwargs_container(self):
         """Clear all widgets from kwargs container."""
-        # Remove existing widgets
         while len(self._kwargs_container) > 0:
             widget = self._kwargs_container[0]
             self._kwargs_container.remove(widget)
-
-    def _build_kwargs_widgets(self, schema):
-        """Build kwargs widgets from OpSchema.default_kwargs.
-
-        Args:
-            schema: OpSchema proto message with default_kwargs field
-        """
-        self._clear_kwargs_container()
-
-        # Get default_kwargs as a dict
-        default_kwargs = dict(schema.default_kwargs)
-
-        for key, value in default_kwargs.items():
-            widget = self._create_widget_for_value(key, value)
-            if widget is not None:
-                self._kwargs_container.append(widget)
 
     def _create_widget_for_value(self, key: str, value):
         """Create appropriate widget for a kwargs value type.
@@ -269,18 +301,17 @@ class ImageProcessingWidget(_WidgetBase):
         Returns:
             magicgui widget or None for unsupported types (list_value)
         """
-        # Determine widget type based on protobuf struct value kind
         # struct_pb2.Value has different fields for different types
         if isinstance(value, bool):
             return CheckBox(value=value, label=key)
         elif isinstance(value, int):
-            return SpinBox(value=value, label=key)
+            return SpinBox(value=value, label=key, step=1, format="%d")
         elif isinstance(value, float):
             return FloatSpinBox(value=value, label=key)
         elif isinstance(value, str):
             return LineEdit(value=value, label=key)
         elif isinstance(value, list):
-            # Skip list values for now - complex UI
+            # TODO: Skip list values for now - complex UI
             logger.debug("Skipping list kwargs: %s", key)
             return None
         else:
