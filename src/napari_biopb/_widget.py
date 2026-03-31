@@ -2,7 +2,18 @@ import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
-from magicgui.widgets import ComboBox, Container, ProgressBar, create_widget
+from magicgui.widgets import (
+    CheckBox,
+    ComboBox,
+    Container,
+    FloatSpinBox,
+    Label,
+    LineEdit,
+    ProgressBar,
+    SpinBox,
+    create_widget,
+)
+from qtpy.QtCore import QTimer
 
 if TYPE_CHECKING:
     import napari
@@ -131,14 +142,150 @@ class ImageProcessingWidget(_WidgetBase):
 
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__(viewer)
+
+        # Op selector for choosing which operation to run
+        self._op_selector = ComboBox(
+            choices=[""],  # Empty initially, populated on server connect
+            label="Op",
+        )
+
+        # Container for dynamically generated kwargs widgets
+        self._kwargs_container = Container(label="Kwargs")
+
+        # Status label for ops connection status
+        self._ops_status = Label(value="", label="Ops Status")
+
+        # Store schemas for each op (populated from GetOpNames response)
+        self._op_schemas = {}
+
+        # Debounce timer for server URL changes (1.5 seconds)
+        self._debounce_timer = QTimer()
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.timeout.connect(self._fetch_ops)
+
+        # Connect server changes to debounce timer
+        self._server.changed.connect(lambda: self._debounce_timer.start(1500))
+
+        # Connect op selector changes to rebuild kwargs widgets
+        self._op_selector.changed.connect(self._on_op_changed)
+
         self.extend(
             self._elements
             + [
+                self._ops_status,
+                self._op_selector,
+                self._kwargs_container,
                 self._progress_bar,
                 self._cancel_button,
                 self._run_button,
             ]
         )
+
+    def _snapshot(self) -> dict:
+        """Capture current widget settings including op and kwargs."""
+        settings = super()._snapshot()
+        # Add op selector value
+        settings["Op"] = self._op_selector.value
+        # Add kwargs container widgets
+        for w in self._kwargs_container:
+            settings[w.label] = w.value
+        return settings
+
+    def _fetch_ops(self):
+        """Fetch available operations from server asynchronously."""
+        from ._grpc import get_op_names
+
+        self._ops_status.value = "Fetching..."
+        settings = self._snapshot()
+
+        def _fetch():
+            try:
+                op_names = get_op_names(settings)
+                # Store schemas for each op
+                self._op_schemas = dict(op_names.op_schemas)
+                # Get list of op names
+                op_list = list(op_names.op_names)
+                return op_list
+            except Exception as e:
+                logger.debug("Failed to fetch ops: %s", e)
+                return None
+
+        def _on_result(op_list):
+            if op_list is None:
+                self._ops_status.value = "Error: could not fetch ops"
+                self._op_selector.choices = [""]
+            else:
+                self._ops_status.value = f"Connected ({len(op_list)} ops)"
+                self._op_selector.choices = op_list
+                if op_list:
+                    self._op_selector.value = op_list[0]
+
+        from napari.qt.threading import thread_worker
+
+        worker = thread_worker(_fetch)
+        worker.returned.connect(_on_result)
+        worker.start()
+
+    def _on_op_changed(self):
+        """Rebuild kwargs widgets when op selection changes."""
+        op_name = self._op_selector.value
+        if not op_name or op_name not in self._op_schemas:
+            self._clear_kwargs_container()
+            return
+
+        schema = self._op_schemas[op_name]
+        self._build_kwargs_widgets(schema)
+
+    def _clear_kwargs_container(self):
+        """Clear all widgets from kwargs container."""
+        # Remove existing widgets
+        while len(self._kwargs_container) > 0:
+            widget = self._kwargs_container[0]
+            self._kwargs_container.remove(widget)
+
+    def _build_kwargs_widgets(self, schema):
+        """Build kwargs widgets from OpSchema.default_kwargs.
+
+        Args:
+            schema: OpSchema proto message with default_kwargs field
+        """
+        self._clear_kwargs_container()
+
+        # Get default_kwargs as a dict
+        default_kwargs = dict(schema.default_kwargs)
+
+        for key, value in default_kwargs.items():
+            widget = self._create_widget_for_value(key, value)
+            if widget is not None:
+                self._kwargs_container.append(widget)
+
+    def _create_widget_for_value(self, key: str, value):
+        """Create appropriate widget for a kwargs value type.
+
+        Args:
+            key: Parameter name (used as label)
+            value: Default value (determines widget type)
+
+        Returns:
+            magicgui widget or None for unsupported types (list_value)
+        """
+        # Determine widget type based on protobuf struct value kind
+        # struct_pb2.Value has different fields for different types
+        if isinstance(value, bool):
+            return CheckBox(value=value, label=key)
+        elif isinstance(value, int):
+            return SpinBox(value=value, label=key)
+        elif isinstance(value, float):
+            return FloatSpinBox(value=value, label=key)
+        elif isinstance(value, str):
+            return LineEdit(value=value, label=key)
+        elif isinstance(value, list):
+            # Skip list values for now - complex UI
+            logger.debug("Skipping list kwargs: %s", key)
+            return None
+        else:
+            logger.debug("Unknown kwargs type for %s: %s", key, type(value))
+            return None
 
     def run(self):
         from ._grpc import grpc_process_image
