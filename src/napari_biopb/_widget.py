@@ -1,3 +1,4 @@
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -5,6 +6,8 @@ from magicgui.widgets import ComboBox, Container, ProgressBar, create_widget
 
 if TYPE_CHECKING:
     import napari
+
+logger = logging.getLogger(__name__)
 
 
 class _WidgetBase(Container):
@@ -34,9 +37,9 @@ class _WidgetBase(Container):
             self._cancel_callback = None
 
     def _error(self, exc: Exception):
-        """Handle errors during processing."""
+        """Log error (napari displays it via notification_manager)."""
         self._cleanup()
-        raise exc
+        logger.error("Processing failed: %s", exc, exc_info=True)
 
     def _cancel(self, worker):
         """Cancel the running worker."""

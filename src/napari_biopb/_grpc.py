@@ -111,6 +111,9 @@ def grpc_object_detection(
     else:
         assert image_data.ndim == 4
 
+    server = settings["Server"]
+    logger.info("Starting object detection on %s", server)
+
     # call server
     with _get_grpc_channel(settings) as channel:
         stub = proto.ObjectDetectionStub(channel)
@@ -120,7 +123,7 @@ def grpc_object_detection(
             response = proto.DetectionResponse()
 
             for grid in grid_positions:
-                logger.info(f"patch position {grid}")
+                logger.debug("Processing patch %s", grid)
 
                 patch = np.array(image.__getitem__(grid))
 
@@ -131,15 +134,16 @@ def grpc_object_detection(
 
                 patch_response = _adjust_response_offset(patch_response, grid)
 
-                logger.info(
-                    f"Detected {len(patch_response.detections)} cells in patch"
+                logger.debug(
+                    "Detected %d cells in patch",
+                    len(patch_response.detections),
                 )
 
                 response.MergeFrom(patch_response)
 
                 yield
 
-            logger.info(f"Detected {len(response.detections)} cells in image")
+            logger.info("Detected %d cells in image", len(response.detections))
 
             yield _generate_label(
                 response, np.zeros(image_data.shape[1:-1], dtype="uint16")
@@ -172,6 +176,9 @@ def grpc_process_image(
         grid_positions is None
     ), "Grid-processing unimplemented -- try object-detection"
 
+    server = settings["Server"]
+    logger.info("Starting image processing on %s", server)
+
     # call server
     with _get_grpc_channel(settings) as channel:
         stub = proto.ProcessImageStub(channel)
@@ -191,4 +198,5 @@ def grpc_process_image(
             if not settings["3D"]:
                 output = output.squeeze(0)
 
+            logger.debug("Processed image, output shape: %s", output.shape)
             yield output
