@@ -16,6 +16,8 @@ from magicgui.widgets import (
 from qtpy.QtCore import QTimer
 from napari.qt.threading import thread_worker
 
+from ._config import get_grid_params, load_config, save_config
+
 if TYPE_CHECKING:
     import napari
 
@@ -118,20 +120,25 @@ class _WidgetBase(Container):
         self._viewer = viewer
         self._cancel_callback = None
 
+        # Load persisted config
+        self._config = load_config()
+
         self._image_layer_combo = create_widget(
             label="Image", annotation="napari.layers.Image"
         )
 
-        self._is3d = create_widget(label="3D", annotation=bool)
+        self._is3d = create_widget(
+            label="3D", annotation=bool, value=self._config.get("3D", False)
+        )
 
         self._server = create_widget(
-            value="lacss.biopb.org",
+            value=self._config["server"]["url"],
             label="Server",
             annotation=str,
         )
 
         self._scheme = ComboBox(
-            value="Auto",
+            value=self._config["server"]["scheme"],
             choices=["Auto", "HTTP", "HTTPS"],
             label="Scheme",
         )
@@ -154,6 +161,14 @@ class _WidgetBase(Container):
             self._server,
             self._scheme,
         ]
+
+    def _save_config(self):
+        """Save current widget settings to config file."""
+        settings = self._snapshot()
+        self._config["server"]["url"] = settings["Server"]
+        self._config["server"]["scheme"] = settings["Scheme"]
+        self._config["3D"] = settings["3D"]
+        save_config(self._config)
 
 
 class ImageProcessingWidget(_WidgetBase):
@@ -345,6 +360,11 @@ class ImageProcessingWidget(_WidgetBase):
 
             self.out_layer.refresh()
 
+        def _on_success():
+            """Callback on successful completion - cleanup and save config."""
+            self._cleanup()
+            self._save_config()
+
         self.n_results = 0
         settings = self._snapshot()
         image_layer = settings["Image"]
@@ -361,7 +381,7 @@ class ImageProcessingWidget(_WidgetBase):
             self._cancel_callback = lambda: self._cancel(worker)
             self._cancel_button.clicked.connect(self._cancel_callback)
             worker.yielded.connect(_update)
-            worker.finished.connect(self._cleanup)
+            worker.finished.connect(_on_success)
             worker.errored.connect(self._error)
 
             worker.start()
@@ -372,8 +392,11 @@ class ObjectDetectionWidget(_WidgetBase):
 
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__(viewer)
+
+        detection_config = self._config.get("detection", {})
+
         self._threshold = create_widget(
-            value=0.4,
+            value=detection_config.get("min_score", 0.4),
             label="Min Score",
             annotation=float,
             widget_type="FloatSlider",
@@ -388,7 +411,7 @@ class ObjectDetectionWidget(_WidgetBase):
         self._use_advanced.changed.connect(self._activte_advanced_inputs)
 
         self._size_hint = create_widget(
-            value=32.0,
+            value=detection_config.get("size_hint", 32.0),
             label="Size Hint",
             annotation=float,
             widget_type="FloatSlider",
@@ -396,21 +419,15 @@ class ObjectDetectionWidget(_WidgetBase):
         )
 
         self._nms = ComboBox(
-            value="Off",
+            value=detection_config.get("nms", "Off"),
             choices=["Off", "Iou-0.2", "Iou-0.4", "Iou-0.6", "Iou-0.8"],
             label="NMS",
             visible=False,
         )
 
         self._aspect_ratio = create_widget(
-            value=1.0,
+            value=detection_config.get("z_aspect_ratio", 1.0),
             label="Z Aspect Ratio",
-            options={"visible": False},
-        )
-
-        self._grid_size_limit = create_widget(
-            value=64,
-            label="Grid Size Limit [MPixel]",
             options={"visible": False},
         )
 
@@ -418,7 +435,6 @@ class ObjectDetectionWidget(_WidgetBase):
             self._size_hint,
             self._nms,
             self._aspect_ratio,
-            self._grid_size_limit,
         ]
 
         self._elements += [
@@ -454,20 +470,14 @@ class ObjectDetectionWidget(_WidgetBase):
         Returns:
             list of slice tuples defining patch positions
         """
-        if settings["3D"]:
-            pos_pars = (
-                image.shape[:-1],
-                np.array((64, 512, 512), dtype=int),
-                np.array((48, 480, 480), dtype=int),
-            )
-        else:
-            # gs_ = int(settings["Grid Size Limit [MPixel]"] ** 0.5) * 1024
-            # ss_ = gs_ - int(settings["Size Hint"] * 4)
-            pos_pars = (
-                image.shape[:-1],
-                np.array((4096, 4096), dtype=int),
-                np.array((4000, 4000), dtype=int),
-            )
+        is_3d = settings["3D"]
+        grid_size, stride = get_grid_params(is_3d, self._config)
+
+        pos_pars = (
+            image.shape[:-1],
+            grid_size,
+            stride,
+        )
 
         grid_start = [
             slice(0, max(d - (gs - ss), 1), ss) for d, gs, ss in zip(*pos_pars)
@@ -481,6 +491,20 @@ class ObjectDetectionWidget(_WidgetBase):
             grids.append(tuple(slc))
 
         return grids
+
+    def _save_config(self):
+        """Save current widget settings to config file."""
+        settings = self._snapshot()
+        self._config["server"]["url"] = settings["Server"]
+        self._config["server"]["scheme"] = settings["Scheme"]
+        self._config["3D"] = settings["3D"]
+        self._config["detection"]["min_score"] = settings["Min Score"]
+        self._config["detection"]["size_hint"] = settings["Size Hint"]
+        self._config["detection"]["nms"] = settings["NMS"]
+        self._config["detection"]["z_aspect_ratio"] = settings[
+            "Z Aspect Ratio"
+        ]
+        save_config(self._config)
 
     def run(self):
         from ._grpc import grpc_object_detection
@@ -508,6 +532,11 @@ class ObjectDetectionWidget(_WidgetBase):
                 self.n_results += 1
                 self.out_layer.refresh()
 
+        def _on_success():
+            """Callback on successful completion - cleanup and save config."""
+            self._cleanup()
+            self._save_config()
+
         with image_layer.dask_optimized_slicing():
             image_data = self._get_data(image_layer, settings["3D"])
 
@@ -524,7 +553,7 @@ class ObjectDetectionWidget(_WidgetBase):
             self._cancel_callback = lambda: self._cancel(worker)
             self._cancel_button.clicked.connect(self._cancel_callback)
             worker.yielded.connect(_update)
-            worker.finished.connect(self._cleanup)
+            worker.finished.connect(_on_success)
             worker.errored.connect(self._error)
 
             worker.start()

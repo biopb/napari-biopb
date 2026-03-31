@@ -33,6 +33,7 @@ dependencies = [
     "opencv-python-headless",
     "grpcio_tools",
     "vedo",
+    "platformdirs",
 ]
 
 [project.optional-dependencies]

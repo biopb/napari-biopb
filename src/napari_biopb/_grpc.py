@@ -10,6 +10,7 @@ from google.protobuf import empty_pb2, struct_pb2
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 from napari.qt.threading import thread_worker
 
+from ._config import load_config
 from ._render import _adjust_response_offset, _generate_label
 from ._typing import napari_data
 
@@ -130,6 +131,10 @@ def _get_grpc_channel(settings: dict):
             f"Invalid server URL: '{server_url}'. Use format 'hostname:port' (e.g., 'localhost:50051') or 'hostname' (defaults to port 443)"
         )
 
+    config = load_config()
+    max_msg_size = config["grpc"]["max_message_size_mb"]
+    max_msg_bytes = 1024 * 1024 * max_msg_size
+
     scheme = settings["Scheme"]
     if scheme == "Auto":
         scheme = "HTTPS" if port == 443 else "HTTP"
@@ -137,25 +142,29 @@ def _get_grpc_channel(settings: dict):
         return grpc.secure_channel(
             target=server_url,
             credentials=grpc.ssl_channel_credentials(),
-            options=[("grpc.max_receive_message_length", 1024 * 1024 * 512)],
+            options=[("grpc.max_receive_message_length", max_msg_bytes)],
         )
     else:
         return grpc.insecure_channel(
             target=server_url,
-            options=[("grpc.max_receive_message_length", 1024 * 1024 * 512)],
+            options=[("grpc.max_receive_message_length", max_msg_bytes)],
         )
 
 
-def check_server_health(settings: dict, timeout: float = 5.0) -> bool:
+def check_server_health(settings: dict, timeout: float | None = None) -> bool:
     """Check if the gRPC server is healthy and ready to serve requests.
 
     Args:
         settings: Widget settings dict (must contain 'Server' and 'Scheme')
-        timeout: Timeout in seconds for the health check
+        timeout: Timeout in seconds for the health check. If None, uses config value.
 
     Returns:
         True if server is healthy, False otherwise
     """
+    if timeout is None:
+        config = load_config()
+        timeout = config["timeout"]["health_check"]
+
     try:
         with _get_grpc_channel(settings) as channel:
             stub = health_pb2_grpc.HealthStub(channel)
@@ -167,12 +176,14 @@ def check_server_health(settings: dict, timeout: float = 5.0) -> bool:
         return False
 
 
-def get_op_names(settings: dict, timeout: float = 10.0) -> proto.OpNames:
+def get_op_names(
+    settings: dict, timeout: float | None = None
+) -> proto.OpNames:
     """Query server for available operations and their schemas.
 
     Args:
         settings: Widget settings dict (must contain 'Server' and 'Scheme')
-        timeout: Timeout in seconds for the request
+        timeout: Timeout in seconds for the request. If None, uses config value.
 
     Returns:
         OpNames proto containing operation names and their schemas
@@ -180,6 +191,10 @@ def get_op_names(settings: dict, timeout: float = 10.0) -> proto.OpNames:
     Raises:
         Exception: If connection or query fails
     """
+    if timeout is None:
+        config = load_config()
+        timeout = config["timeout"]["get_op_names"]
+
     with _get_grpc_channel(settings) as channel:
         stub = proto.ProcessImageStub(channel)
         response = stub.GetOpNames(empty_pb2.Empty(), timeout=timeout)
@@ -233,6 +248,10 @@ def grpc_object_detection(
             f"(batch, {'z,' if is3d else ''}y, x, channel). Got shape {image_data.shape} with {image_data.ndim} dimensions"
         )
 
+    # Get timeout from config
+    config = load_config()
+    timeout = config["timeout"]["detection_3d" if is3d else "detection_2d"]
+
     server = settings["Server"]
     logger.info("Starting object detection on %s", server)
 
@@ -251,7 +270,7 @@ def grpc_object_detection(
 
                 patch_response = stub.RunDetection(
                     _object_detection_build_request(patch, settings),
-                    timeout=300 if settings["3D"] else 15,
+                    timeout=timeout,
                 )
 
                 patch_response = _adjust_response_offset(patch_response, grid)
@@ -304,6 +323,10 @@ def grpc_process_image(
             "Grid processing is not supported for image processing. Use object detection instead."
         )
 
+    # Get timeout from config
+    config = load_config()
+    timeout = config["timeout"]["detection_3d" if is3d else "detection_2d"]
+
     server = settings["Server"]
     logger.info("Starting image processing on %s", server)
 
@@ -323,7 +346,7 @@ def grpc_process_image(
                     op_name=op_name,
                     kwargs=dict_to_struct(kwargs),
                 ),
-                timeout=300 if settings["3D"] else 15,
+                timeout=timeout,
             )
 
             output = deserialize_to_numpy(response.image_data.pixels)
