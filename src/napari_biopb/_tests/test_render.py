@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from typing import List
 
 from napari_biopb._render import (
     _adjust_response_offset,
@@ -41,14 +42,14 @@ class MockFace:
 class MockPolygon:
     """Mock for protobuf Polygon."""
 
-    def __init__(self, points: list[MockPoint]):
+    def __init__(self, points: List[MockPoint]):
         self.points = points
 
 
 class MockMesh:
     """Mock for protobuf Mesh."""
 
-    def __init__(self, verts: list[MockVertex], faces: list[MockFace]):
+    def __init__(self, verts: List[MockVertex], faces: List[MockFace]):
         self.verts = verts
         self.faces = faces
 
@@ -79,7 +80,7 @@ class MockDetection:
 class MockDetectionResponse:
     """Mock for protobuf DetectionResponse."""
 
-    def __init__(self, detections: list[MockDetection]):
+    def __init__(self, detections: List[MockDetection]):
         self.detections = detections
 
 

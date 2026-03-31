@@ -8,6 +8,7 @@ import copy
 import json
 import logging
 from pathlib import Path
+from typing import Tuple
 
 import numpy as np
 
@@ -131,7 +132,7 @@ def save_config(config: dict) -> None:
 
 def get_grid_params(
     is_3d: bool, config: dict
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """Get grid size and stride from config.
 
     Args:

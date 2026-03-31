@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from typing import Tuple
 
 from ._utils import _filter_boxes
 
@@ -145,7 +146,7 @@ def _generate_label(
     return label
 
 
-def _adjust_response_offset(response, grid: tuple[slice, ...]):
+def _adjust_response_offset(response, grid: Tuple[slice, ...]):
     """Adjust detection coordinates by grid offset.
 
     Args:

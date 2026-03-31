@@ -1,5 +1,5 @@
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Tuple
 
 import numpy as np
 from magicgui.widgets import (
@@ -460,7 +460,7 @@ class ObjectDetectionWidget(_WidgetBase):
 
     def _get_grid_positions(
         self, image, settings: dict
-    ) -> list[tuple[slice, ...]]:
+    ) -> List[Tuple[slice, ...]]:
         """Compute grid positions for tiled processing.
 
         Args:

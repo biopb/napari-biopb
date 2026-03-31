@@ -32,6 +32,7 @@ dependencies = [
     "biopb >= 0.2.0",
     "opencv-python-headless",
     "grpcio_tools",
+    "grpcio-health-checking",
     "vedo",
     "platformdirs",
 ]
@@ -72,6 +73,10 @@ where = ["src"]
 [tool.setuptools_scm]
 version_file = "src/napari_biopb/_version.py"
 
+
+[tool.pytest.ini_options]
+qt_api = "pyqt5"
+addopts = "--ignore-glob='*_vendor*'"
 
 [tool.black]
 line-length = 79

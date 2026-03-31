@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Generator
+from typing import Generator, Optional, Tuple
 
 import biopb.image as proto
 import grpc
@@ -22,7 +22,7 @@ _SERVER_URL_PATTERN = re.compile(
 )
 
 
-def _validate_server_url(server_url: str) -> tuple[str, int]:
+def _validate_server_url(server_url: str) -> Tuple[str, int]:
     """Validate and parse server URL into host and port.
 
     Args:
@@ -151,7 +151,9 @@ def _get_grpc_channel(settings: dict):
         )
 
 
-def check_server_health(settings: dict, timeout: float | None = None) -> bool:
+def check_server_health(
+    settings: dict, timeout: Optional[float] = None
+) -> bool:
     """Check if the gRPC server is healthy and ready to serve requests.
 
     Args:
@@ -177,7 +179,7 @@ def check_server_health(settings: dict, timeout: float | None = None) -> bool:
 
 
 def get_op_names(
-    settings: dict, timeout: float | None = None
+    settings: dict, timeout: Optional[float] = None
 ) -> proto.OpNames:
     """Query server for available operations and their schemas.
 
@@ -295,7 +297,7 @@ def grpc_object_detection(
 def grpc_process_image(
     image_data: napari_data,
     settings: dict,
-    grid_positions: list | None = None,
+    grid_positions: Optional[list] = None,
 ) -> Generator[np.ndarray, None, None]:
     """Run image processing via gRPC.
 
