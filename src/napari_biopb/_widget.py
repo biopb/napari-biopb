@@ -257,10 +257,17 @@ class ImageProcessingWidget(_WidgetBase):
                 self._op_schemas = dict(result.op_schemas)
 
                 op_list = list(result.names)
-                self._ops_status.value = f"Connected ({len(op_list)} ops)"
                 self._op_selector.choices = op_list
                 if op_list:
                     self._op_selector.value = op_list[0]
+
+                if len(op_list) == 1:
+                    # Single op: hide selector, show op name in status
+                    self._ops_status.value = f"Connected: {op_list[0]}"
+                    self._op_selector.visible = False
+                elif op_list:
+                    # Multiple ops: show selector with count in status
+                    self._ops_status.value = f"Connected ({len(op_list)} ops)"
                     self._op_selector.visible = True
 
         self._ops_status.value = "No op schema available"
