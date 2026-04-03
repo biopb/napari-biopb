@@ -220,9 +220,7 @@ class ImageProcessingWidget(_WidgetBase):
         iter_spec = _get_iter_spec(axis_order, hint)
 
         # Validate
-        warnings = _validate_data_shape(image_data, axis_order, hint)
-        for w in warnings:
-            logger.warning(w)
+        _validate_data_shape(image_data, axis_order, hint)
 
         # Prepare result builder and progress
         result_builder = ResultBuilder(image_data.shape, iter_spec.iter_dims)

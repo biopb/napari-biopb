@@ -70,32 +70,27 @@ def _validate_data_shape(
     data: np.ndarray,
     axis_order: str,
     hint: Optional["proto.InputShapeHint"],
-) -> list:
+) -> None:
     """Validate data shape against hint, return warnings.
 
     Args:
         data: Image data array
         axis_order: Axis order string (e.g., "YXC")
         hint: InputShapeHint from op schema (may be None)
-
-    Returns:
-        List of warning messages (empty if all valid)
     """
-    warnings = []
     if hint is None:
-        return warnings
+        return
 
-    axis_mapping = dict(zip(axis_order, range(len(axis_order))))
-    for axis_name, dim_idx in axis_mapping.items():
-        if dim_idx >= data.ndim:
-            continue  # Skip axes not present in data
-        size = data.shape[dim_idx]
-        if axis_name in hint.required_multivalue and size <= 1:
-            warnings.append(
-                f"Dimension '{axis_name}' has size {size} but service requires >1"
+    for axis_name in hint.required_multivalue:
+        axis_name = str(axis_name).upper()  # Ensure uppercase for comparison
+        if axis_name not in axis_order:
+            logger.warning(
+                f"Service requires multivalue axis '{axis_name}' but it's not present in data"
             )
-
-    return warnings
+        elif axis_order[axis_name] == 1:
+            logger.warning(
+                f"Dimension '{axis_name}' has size 1 but service requires >1"
+            )
 
 
 def _get_iter_spec(
