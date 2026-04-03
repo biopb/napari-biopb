@@ -45,6 +45,16 @@ class ImageProcessingWidget(_WidgetBase):
             visible=False,  # Hidden until valid schema is loaded
         )
 
+        # Description label for the selected op (multiline with word wrap)
+        self._op_description = Label(value="", label="")
+        self._op_description.visible = False
+        # Enable word wrap and expanding width to follow container size
+        self._op_description.native.setWordWrap(True)
+        self._op_description.native.setSizePolicy(
+            7,  # QSizePolicy.Expanding - width follows container
+            0,  # QSizePolicy.Fixed - height adjusts to content
+        )
+
         # Container for dynamically generated kwargs widgets
         self._kwargs_container = Container(label="Kwargs", visible=False)
 
@@ -53,6 +63,9 @@ class ImageProcessingWidget(_WidgetBase):
 
         # Store schemas for each op (populated from GetOpNames response)
         self._op_schemas = {}
+
+        # Store parsed labels for current op (key -> display label)
+        self._op_labels = {}
 
         # Debounce timer for server URL changes (1.5 seconds)
         self._debounce_timer = QTimer()
@@ -70,6 +83,7 @@ class ImageProcessingWidget(_WidgetBase):
             + [
                 self._ops_status,
                 self._op_selector,
+                self._op_description,
                 self._kwargs_container,
                 self._progress_bar,
                 self._cancel_button,
@@ -88,7 +102,9 @@ class ImageProcessingWidget(_WidgetBase):
             value = w.value
             if isinstance(w, SpinBox):
                 value = int(value)
-            settings[w.label] = value
+            # Use original parameter key (stored in _param_key) for kwargs
+            key = getattr(w, "_param_key", w.label)
+            settings[key] = value
         return settings
 
     def _fetch_ops(self):
@@ -145,9 +161,22 @@ class ImageProcessingWidget(_WidgetBase):
 
         if not op_name or op_name not in self._op_schemas:
             self._kwargs_container.visible = False
+            self._op_description.visible = False
+            self._op_labels = {}
             return
 
         schema = self._op_schemas[op_name]
+
+        # Show description if available
+        if schema.description:
+            self._op_description.value = schema.description
+            self._op_description.visible = True
+        else:
+            self._op_description.visible = False
+
+        # Parse labels for kwargs widgets
+        self._op_labels = self._parse_labels(schema.labels)
+
         has_kwargs = bool(dict(schema.default_kwargs))
         self._kwargs_container.visible = has_kwargs
 
@@ -169,25 +198,46 @@ class ImageProcessingWidget(_WidgetBase):
             widget = self._kwargs_container[0]
             self._kwargs_container.remove(widget)
 
+    def _parse_labels(self, labels: list) -> dict:
+        """Parse repeated string labels into key->label dict.
+
+        Args:
+            labels: List of strings in 'key=label' format
+
+        Returns:
+            Dict mapping parameter keys to display labels
+        """
+        result = {}
+        for item in labels:
+            if "=" in item:
+                key, label = item.split("=", 1)
+                key = key.strip()
+                if key:  # Skip empty keys
+                    result[key] = label.strip()
+        return result
+
     def _create_widget_for_value(self, key: str, value):
         """Create appropriate widget for a kwargs value type.
 
         Args:
-            key: Parameter name (used as label)
+            key: Parameter name (used as fallback label)
             value: Default value (determines widget type)
 
         Returns:
             magicgui widget or None for unsupported types (list_value)
         """
+        # Use parsed label if available, otherwise use key name
+        label = self._op_labels.get(key, key)
+
         # struct_pb2.Value has different fields for different types
         if isinstance(value, bool):
-            return CheckBox(value=value, label=key)
+            widget = CheckBox(value=value, label=label)
         elif isinstance(value, int):
-            return SpinBox(value=value, label=key, step=1, format="%d")
+            widget = SpinBox(value=value, label=label, step=1, format="%d")
         elif isinstance(value, float):
-            return FloatSpinBox(value=value, label=key)
+            widget = FloatSpinBox(value=value, label=label)
         elif isinstance(value, str):
-            return LineEdit(value=value, label=key)
+            widget = LineEdit(value=value, label=label)
         elif isinstance(value, list):
             # TODO: Skip list values for now - complex UI
             logger.debug("Skipping list kwargs: %s", key)
@@ -195,6 +245,10 @@ class ImageProcessingWidget(_WidgetBase):
         else:
             logger.debug("Unknown kwargs type for %s: %s", key, type(value))
             return None
+
+        # Store original parameter key for use in _snapshot
+        widget._param_key = key
+        return widget
 
     def run(self):
         from ._grpc import grpc_process_image
