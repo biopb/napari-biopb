@@ -7,6 +7,7 @@ except ImportError:
 except Exception:
     __version__ = "unknown"
 
-from ._widget import ImageProcessingWidget, ObjectDetectionWidget
+from ._object_detection import ObjectDetectionWidget
+from ._image_processing import ImageProcessingWidget
 
 __all__ = ("ObjectDetectionWidget", "ImageProcessingWidget")

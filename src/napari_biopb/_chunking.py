@@ -38,7 +38,7 @@ def _get_axis_mapping(image_layer: "napari.layers.Image", is_3d: bool) -> str:
     if image_layer.multiscale:
         data = data[0]
         logger.debug(
-            f"Image is multiscale, using highest resolution {data.shape} level for axis mapping"
+            f"Image is multiscale, using highest resolution level for axis mapping. Shape: {data.shape}"
         )
 
     ndim = data.ndim
