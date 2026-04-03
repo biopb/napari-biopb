@@ -144,7 +144,6 @@ class ObjectDetectionWidget(_WidgetBase):
         """Save current widget settings to config file."""
         settings = self._snapshot()
         self._config["server"]["url"] = settings["Server"]
-        self._config["server"]["scheme"] = settings["Scheme"]
         self._config["3D"] = settings["3D"]
         self._config["detection"]["min_score"] = settings["Min Score"]
         self._config["detection"]["size_hint"] = settings["Size Hint"]

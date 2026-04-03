@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = {
     "server": {
         "url": "lacss.biopb.org",
-        "scheme": "Auto",
     },
     "detection": {
         "min_score": 0.4,

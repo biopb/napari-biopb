@@ -8,38 +8,129 @@ from napari_biopb._grpc import (
     _encode_image,
     _get_detection_settings,
     _get_grpc_channel,
+    _get_label_filter,
     _object_detection_build_request,
-    _validate_server_url,
+    _parse_server_url,
     check_server_health,
 )
 
 
-class TestValidateServerUrl:
-    """Tests for _validate_server_url function."""
+class TestParseServerUrl:
+    """Tests for _parse_server_url function."""
 
     def test_valid_hostname_with_port(self):
         """Valid hostname:port format parses correctly."""
-        host, port = _validate_server_url("localhost:50051")
+        host, port, scheme, label_filter = _parse_server_url("localhost:50051")
         assert host == "localhost"
         assert port == 50051
+        assert scheme is None  # Auto-detect
+        assert label_filter is None
 
     def test_valid_domain_with_port(self):
         """Valid domain:port format parses correctly."""
-        host, port = _validate_server_url("lacss.biopb.org:8080")
+        host, port, scheme, label_filter = _parse_server_url(
+            "lacss.biopb.org:8080"
+        )
         assert host == "lacss.biopb.org"
         assert port == 8080
+        assert scheme is None  # Auto-detect
+        assert label_filter is None
 
     def test_hostname_without_port_defaults_to_443(self):
         """Hostname without port defaults to port 443."""
-        host, port = _validate_server_url("lacss.biopb.org")
+        host, port, scheme, label_filter = _parse_server_url("lacss.biopb.org")
         assert host == "lacss.biopb.org"
         assert port == 443
+        assert scheme is None  # Auto-detect
+        assert label_filter is None
 
     def test_localhost_without_port(self):
         """Local hostname without port defaults to 443."""
-        host, port = _validate_server_url("localhost")
+        host, port, scheme, label_filter = _parse_server_url("localhost")
         assert host == "localhost"
         assert port == 443
+        assert scheme is None  # Auto-detect
+        assert label_filter is None
+
+    def test_http_scheme_prefix(self):
+        """http:// prefix returns HTTP scheme."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "http://localhost:50051"
+        )
+        assert host == "localhost"
+        assert port == 50051
+        assert scheme == "http"
+        assert label_filter is None
+
+    def test_https_scheme_prefix(self):
+        """https:// prefix returns HTTPS scheme."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "https://lacss.biopb.org:8080"
+        )
+        assert host == "lacss.biopb.org"
+        assert port == 8080
+        assert scheme == "https"
+        assert label_filter is None
+
+    def test_https_scheme_no_port(self):
+        """https:// with hostname only defaults to port 443."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "https://lacss.biopb.org"
+        )
+        assert host == "lacss.biopb.org"
+        assert port == 443
+        assert scheme == "https"
+        assert label_filter is None
+
+    def test_http_scheme_no_port(self):
+        """http:// with hostname only defaults to port 443."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "http://localhost"
+        )
+        assert host == "localhost"
+        assert port == 443
+        assert scheme == "http"
+        assert label_filter is None
+
+    def test_url_with_label_filter(self):
+        """URL with path component extracts label filter."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "localhost:50051/filter"
+        )
+        assert host == "localhost"
+        assert port == 50051
+        assert scheme is None
+        assert label_filter == "filter"
+
+    def test_url_with_scheme_and_label_filter(self):
+        """URL with scheme and path extracts label filter."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "http://localhost:50051/filter"
+        )
+        assert host == "localhost"
+        assert port == 50051
+        assert scheme == "http"
+        assert label_filter == "filter"
+
+    def test_url_with_https_and_label_filter(self):
+        """https URL with path extracts label filter."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "https://lacss.biopb.org:8080/segmentation"
+        )
+        assert host == "lacss.biopb.org"
+        assert port == 8080
+        assert scheme == "https"
+        assert label_filter == "segmentation"
+
+    def test_url_without_port_with_label_filter(self):
+        """URL without port (defaults to 443) with path extracts label filter."""
+        host, port, scheme, label_filter = _parse_server_url(
+            "lacss.biopb.org/threshold"
+        )
+        assert host == "lacss.biopb.org"
+        assert port == 443
+        assert scheme is None
+        assert label_filter == "threshold"
 
     def test_invalid_format_raises(self):
         """Invalid URL format raises ValueError."""
@@ -48,11 +139,37 @@ class TestValidateServerUrl:
             ":50051",  # missing hostname
             "local:host:50051",  # invalid hostname
             "",  # empty string
-            "local host:50051",  # space in hostname
+            "local space:50051",  # space in hostname
         ]
         for url in invalid_urls:
             with pytest.raises(ValueError, match="Invalid server URL"):
-                _validate_server_url(url)
+                _parse_server_url(url)
+
+
+class TestGetLabelFilter:
+    """Tests for _get_label_filter function."""
+
+    def test_no_label_filter(self):
+        """URL without path returns None."""
+        assert _get_label_filter("localhost:50051") is None
+        assert _get_label_filter("lacss.biopb.org") is None
+
+    def test_with_label_filter(self):
+        """URL with path returns label filter."""
+        assert _get_label_filter("localhost:50051/filter") == "filter"
+        assert (
+            _get_label_filter("http://localhost:50051/segmentation")
+            == "segmentation"
+        )
+        assert (
+            _get_label_filter("https://lacss.biopb.org/threshold")
+            == "threshold"
+        )
+
+    def test_invalid_url_raises(self):
+        """Invalid URL raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid server URL"):
+            _get_label_filter("invalid:url:format")
 
 
 class TestEncodeImage:
@@ -147,39 +264,35 @@ class TestGetDetectionSettings:
 class TestGetGrpcChannel:
     """Tests for _get_grpc_channel function."""
 
-    def test_http_channel(self):
-        """HTTP scheme creates insecure channel."""
+    def test_http_scheme_from_url(self):
+        """http:// in URL creates insecure channel."""
         settings = {
-            "Server": "localhost:50051",
-            "Scheme": "HTTP",
+            "Server": "http://localhost:50051",
         }
         channel = _get_grpc_channel(settings)
         # Channel is created, verify it's a grpc channel
         assert channel is not None
 
-    def test_https_channel(self):
-        """HTTPS scheme creates secure channel."""
+    def test_https_scheme_from_url(self):
+        """https:// in URL creates secure channel."""
         settings = {
-            "Server": "lacss.biopb.org",
-            "Scheme": "HTTPS",
+            "Server": "https://lacss.biopb.org",
         }
         channel = _get_grpc_channel(settings)
         assert channel is not None
 
     def test_auto_scheme_http_port(self):
-        """Auto scheme with non-443 port uses HTTP."""
+        """URL without scheme and non-443 port uses HTTP."""
         settings = {
             "Server": "localhost:50051",
-            "Scheme": "Auto",
         }
         channel = _get_grpc_channel(settings)
         assert channel is not None
 
     def test_auto_scheme_https_port(self):
-        """Auto scheme with 443 port uses HTTPS."""
+        """URL without scheme and port 443 uses HTTPS."""
         settings = {
             "Server": "lacss.biopb.org",
-            "Scheme": "Auto",
         }
         channel = _get_grpc_channel(settings)
         assert channel is not None
@@ -188,9 +301,25 @@ class TestGetGrpcChannel:
         """Server without port defaults to 443."""
         settings = {
             "Server": "lacss.biopb.org",
-            "Scheme": "HTTPS",
         }
         # Should add :443 to server URL internally
+        channel = _get_grpc_channel(settings)
+        assert channel is not None
+
+    def test_url_with_label_filter(self):
+        """URL with label filter still creates channel correctly."""
+        settings = {
+            "Server": "localhost:50051/filter",
+        }
+        channel = _get_grpc_channel(settings)
+        # Label filter is ignored for channel creation
+        assert channel is not None
+
+    def test_url_with_scheme_and_label_filter(self):
+        """URL with scheme and label filter creates channel correctly."""
+        settings = {
+            "Server": "http://localhost:50051/segmentation",
+        }
         channel = _get_grpc_channel(settings)
         assert channel is not None
 
@@ -198,7 +327,6 @@ class TestGetGrpcChannel:
         """Invalid server URL raises ValueError."""
         settings = {
             "Server": "invalid:url:format",
-            "Scheme": "HTTP",
         }
         with pytest.raises(ValueError, match="Invalid server URL"):
             _get_grpc_channel(settings)
@@ -288,7 +416,6 @@ class TestGrpcObjectDetection:
         settings = {
             "3D": False,
             "Server": "localhost:50051",
-            "Scheme": "HTTP",
             "Z Aspect Ratio": 1.0,
             "Min Score": 0.5,
             "NMS": "Off",

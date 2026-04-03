@@ -103,12 +103,6 @@ class _WidgetBase(Container):
             annotation=str,
         )
 
-        self._scheme = ComboBox(
-            value=self._config["server"]["scheme"],
-            choices=["Auto", "HTTP", "HTTPS"],
-            label="Scheme",
-        )
-
         self._progress_bar = ProgressBar(
             label="Running...", value=0, step=1, visible=False
         )
@@ -125,13 +119,11 @@ class _WidgetBase(Container):
             self._image_layer_combo,
             self._is3d,
             self._server,
-            self._scheme,
         ]
 
     def _save_config(self):
         """Save current widget settings to config file."""
         settings = self._snapshot()
         self._config["server"]["url"] = settings["Server"]
-        self._config["server"]["scheme"] = settings["Scheme"]
         self._config["3D"] = settings["3D"]
         save_config(self._config)

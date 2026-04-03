@@ -18,40 +18,83 @@ from ._typing import napari_data
 
 logger = logging.getLogger(__name__)
 
-# Regex for validating server URL (hostname:port format)
-_SERVER_URL_PATTERN = re.compile(
+# Regex for parsing server URL with optional scheme prefix and path/label filter
+_URL_PATTERN = re.compile(
+    r"^(?:(https?)://)?([^/]+)(?:/([^/]+))?$"  # Optional http/https scheme, host:port, optional path
+)
+
+# Regex for validating hostname:port format (the "rest" part after scheme)
+_HOST_PORT_PATTERN = re.compile(
     r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?:(\d+)$"
 )
 
 
-def _validate_server_url(server_url: str) -> Tuple[str, int]:
-    """Validate and parse server URL into host and port.
+def _parse_server_url(
+    server_url: str,
+) -> Tuple[str, int, Optional[str], Optional[str]]:
+    """Parse server URL extracting host, port, scheme, and optional label filter.
 
     Args:
-        server_url: Server address in format "hostname:port"
+        server_url: URL in one of these formats:
+            - "https://hostname:port/label" (explicit HTTPS with label filter)
+            - "http://hostname:port/label" (explicit HTTP with label filter)
+            - "hostname:port/label" (auto-detect scheme, with label filter)
+            - "hostname:port" (auto-detect, no filter)
+            - "hostname" (auto-detect, defaults to port 443, no filter)
 
     Returns:
-        Tuple of (host, port)
+        Tuple of (host, port, explicit_scheme, label_filter) where:
+        - explicit_scheme is "HTTP", "HTTPS", or None (meaning auto-detect)
+        - label_filter is the path component (e.g., "filter") or None
 
     Raises:
         ValueError: If URL format is invalid
     """
-    match = _SERVER_URL_PATTERN.match(server_url)
-    if match:
-        port = int(match.group(1))
-        host = server_url.rsplit(":", 1)[0]
-        return host, port
+    match = _URL_PATTERN.match(server_url.strip())
+    if not match:
+        raise ValueError(
+            f"Invalid server URL format: '{server_url}'. "
+            "Expected 'http://hostname:port', 'https://hostname:port', 'hostname:port', or 'hostname'"
+        )
+
+    explicit_scheme = match.group(1)  # None, "http", or "https"
+    host_port = match.group(2)
+    label_filter = match.group(3)  # None or path component like "filter"
+
+    # Parse host:port from the host_port part
+    host_port_match = _HOST_PORT_PATTERN.match(host_port)
+    if host_port_match:
+        port = int(host_port_match.group(1))
+        host = host_port.rsplit(":", 1)[0]
+        return host, port, explicit_scheme, label_filter
 
     # Check if it's a hostname without port (will default to 443)
     if re.match(
         r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$",
-        server_url,
+        host_port,
     ):
-        return server_url, 443
+        return host_port, 443, explicit_scheme, label_filter
 
     raise ValueError(
-        f"Invalid server URL format: '{server_url}'. Expected 'hostname:port' or 'hostname'"
+        f"Invalid server URL format: '{server_url}'. "
+        "Use format 'hostname:port' (e.g., 'localhost:50051') or 'hostname' (defaults to port 443)"
     )
+
+
+def _get_label_filter(server_url: str) -> Optional[str]:
+    """Extract label filter from server URL path component.
+
+    Args:
+        server_url: URL like "localhost:50051/filter" or "hostname:port"
+
+    Returns:
+        Label filter string (e.g., "filter") or None if no path component
+
+    Raises:
+        ValueError: If URL format is invalid
+    """
+    _, _, _, label_filter = _parse_server_url(server_url)
+    return label_filter
 
 
 def dict_to_struct(d: dict) -> struct_pb2.Struct:
@@ -132,13 +175,19 @@ def _object_detection_build_request(
 
 
 def _get_grpc_channel(settings: dict):
-    """Create gRPC channel based on server settings.
+    """Create gRPC channel based on server URL.
+
+    Scheme is determined from URL format:
+        - "http://hostname:port" → insecure channel
+        - "https://hostname:port" → secure channel
+        - "hostname:port" → auto (HTTPS for port 443, HTTP otherwise)
+        - "hostname" → auto (defaults to port 443, uses HTTPS)
 
     Args:
-        settings: Widget settings dict with 'Server' and 'Scheme' keys
+        settings: Widget settings dict with 'Server' key
 
     Returns:
-        gRPC channel (secure or insecure based on scheme)
+        gRPC channel (secure or insecure based on URL scheme)
 
     Raises:
         ValueError: If server URL is invalid
@@ -146,29 +195,35 @@ def _get_grpc_channel(settings: dict):
     server_url = settings["Server"]
 
     try:
-        _, port = _validate_server_url(server_url)
+        host, port, explicit_scheme, _ = _parse_server_url(server_url)
     except ValueError:
-        # Re-raise with more context
         raise ValueError(
-            f"Invalid server URL: '{server_url}'. Use format 'hostname:port' (e.g., 'localhost:50051') or 'hostname' (defaults to port 443)"
+            f"Invalid server URL: '{server_url}'. "
+            "Use format 'hostname:port' (e.g., 'localhost:50051') or include scheme like 'http://localhost:50051'"
         )
 
     config = load_config()
     max_msg_size = config["grpc"]["max_message_size_mb"]
     max_msg_bytes = 1024 * 1024 * max_msg_size
 
-    scheme = settings["Scheme"]
-    if scheme == "Auto":
+    # Determine scheme: explicit from URL, or auto-detect based on port
+    if explicit_scheme:
+        scheme = explicit_scheme.upper()
+    else:
         scheme = "HTTPS" if port == 443 else "HTTP"
+
+    # Build target address (host:port format for gRPC)
+    target = f"{host}:{port}"
+
     if scheme == "HTTPS":
         return grpc.secure_channel(
-            target=server_url,
+            target=target,
             credentials=grpc.ssl_channel_credentials(),
             options=[("grpc.max_receive_message_length", max_msg_bytes)],
         )
     else:
         return grpc.insecure_channel(
-            target=server_url,
+            target=target,
             options=[("grpc.max_receive_message_length", max_msg_bytes)],
         )
 
@@ -388,9 +443,9 @@ def _extract_kwargs(settings: dict) -> dict:
     """Extract kwargs from widget settings.
 
     Settings keys matching known op kwarg names are extracted.
-    Non-op-related keys (Image, 3D, Server, Scheme, Status, Op) are excluded.
+    Non-op-related keys (Image, 3D, Server, Status, Op) are excluded.
     """
-    exclude_keys = {"Image", "3D", "Server", "Scheme", "Status", "Op"}
+    exclude_keys = {"Image", "3D", "Server", "Status", "Op"}
     kwargs = {}
     for key, value in settings.items():
         if key not in exclude_keys:

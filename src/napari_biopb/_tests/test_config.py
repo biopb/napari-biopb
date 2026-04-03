@@ -55,7 +55,6 @@ class TestLoadConfig:
 
         # Missing keys should use defaults
         defaults = get_default_config()
-        assert config["server"]["scheme"] == defaults["server"]["scheme"]
         assert config["grid"] == defaults["grid"]
 
     def test_handles_malformed_json(self, mock_config_dir):
@@ -191,9 +190,8 @@ class TestDefaultConfig:
             assert key in DEFAULT_CONFIG
 
     def test_server_config_complete(self):
-        """Server config has url and scheme."""
+        """Server config has url."""
         assert "url" in DEFAULT_CONFIG["server"]
-        assert "scheme" in DEFAULT_CONFIG["server"]
 
     def test_detection_config_complete(self):
         """Detection config has all required fields."""

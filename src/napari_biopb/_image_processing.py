@@ -64,9 +64,6 @@ class ImageProcessingWidget(_WidgetBase):
         # Store schemas for each op (populated from GetOpNames response)
         self._op_schemas = {}
 
-        # Store parsed labels for current op (key -> display label)
-        self._op_labels = {}
-
         # Debounce timer for server URL changes (1.5 seconds)
         self._debounce_timer = QTimer()
         self._debounce_timer.setSingleShot(True)
@@ -109,26 +106,39 @@ class ImageProcessingWidget(_WidgetBase):
 
     def _fetch_ops(self):
         """Fetch available operations from server asynchronously."""
-        from ._grpc import get_op_names
+        from ._grpc import get_op_names, _get_label_filter
 
         self._ops_status.value = "Fetching..."
         self._op_selector.visible = False
         self._kwargs_container.visible = False
         settings = self._snapshot()
 
+        # Extract label filter from server URL
+        label_filter = _get_label_filter(settings["Server"])
+
         def _fetch():
             try:
                 ops = get_op_names(settings)
-                return ops
+                return ops, label_filter
             except Exception as e:
                 logger.debug("Failed to fetch ops: %s", e)
-                return None
+                return None, label_filter
 
-        def _on_result(result):
+        def _on_result(result_tuple):
+            result, label_filter = result_tuple
             if result:
                 self._op_schemas = dict(result.op_schemas)
 
+                # Filter ops by label if specified
                 op_list = list(result.names)
+                if label_filter:
+                    filtered_ops = [
+                        op
+                        for op in op_list
+                        if label_filter in self._op_schemas[op].labels
+                    ]
+                    op_list = filtered_ops
+
                 self._op_selector.choices = op_list
                 if op_list:
                     self._op_selector.value = op_list[0]
@@ -139,8 +149,20 @@ class ImageProcessingWidget(_WidgetBase):
                     self._op_selector.visible = False
                 elif op_list:
                     # Multiple ops: show selector with count in status
-                    self._ops_status.value = f"Connected ({len(op_list)} ops)"
+                    count_str = f" ({len(op_list)} ops"
+                    if label_filter:
+                        count_str += f", filtered by '{label_filter}'"
+                    count_str += ")"
+                    self._ops_status.value = f"Connected{count_str}"
                     self._op_selector.visible = True
+                else:
+                    # No ops match the filter
+                    if label_filter:
+                        self._ops_status.value = (
+                            f"No ops with label '{label_filter}'"
+                        )
+                    else:
+                        self._ops_status.value = "No ops available"
 
         self._ops_status.value = "No op schema available"
         self._op_selector.choices = ["<no ops>"]
@@ -162,7 +184,6 @@ class ImageProcessingWidget(_WidgetBase):
         if not op_name or op_name not in self._op_schemas:
             self._kwargs_container.visible = False
             self._op_description.visible = False
-            self._op_labels = {}
             return
 
         schema = self._op_schemas[op_name]
@@ -173,9 +194,6 @@ class ImageProcessingWidget(_WidgetBase):
             self._op_description.visible = True
         else:
             self._op_description.visible = False
-
-        # Parse labels for kwargs widgets
-        self._op_labels = self._parse_labels(schema.labels)
 
         has_kwargs = bool(dict(schema.default_kwargs))
         self._kwargs_container.visible = has_kwargs
@@ -198,46 +216,25 @@ class ImageProcessingWidget(_WidgetBase):
             widget = self._kwargs_container[0]
             self._kwargs_container.remove(widget)
 
-    def _parse_labels(self, labels: list) -> dict:
-        """Parse repeated string labels into key->label dict.
-
-        Args:
-            labels: List of strings in 'key=label' format
-
-        Returns:
-            Dict mapping parameter keys to display labels
-        """
-        result = {}
-        for item in labels:
-            if "=" in item:
-                key, label = item.split("=", 1)
-                key = key.strip()
-                if key:  # Skip empty keys
-                    result[key] = label.strip()
-        return result
-
     def _create_widget_for_value(self, key: str, value):
         """Create appropriate widget for a kwargs value type.
 
         Args:
-            key: Parameter name (used as fallback label)
+            key: Parameter name (used as widget label)
             value: Default value (determines widget type)
 
         Returns:
             magicgui widget or None for unsupported types (list_value)
         """
-        # Use parsed label if available, otherwise use key name
-        label = self._op_labels.get(key, key)
-
         # struct_pb2.Value has different fields for different types
         if isinstance(value, bool):
-            widget = CheckBox(value=value, label=label)
+            widget = CheckBox(value=value, label=key)
         elif isinstance(value, int):
-            widget = SpinBox(value=value, label=label, step=1, format="%d")
+            widget = SpinBox(value=value, label=key, step=1, format="%d")
         elif isinstance(value, float):
-            widget = FloatSpinBox(value=value, label=label)
+            widget = FloatSpinBox(value=value, label=key)
         elif isinstance(value, str):
-            widget = LineEdit(value=value, label=label)
+            widget = LineEdit(value=value, label=key)
         elif isinstance(value, list):
             # TODO: Skip list values for now - complex UI
             logger.debug("Skipping list kwargs: %s", key)
