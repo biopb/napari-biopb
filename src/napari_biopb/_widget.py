@@ -16,6 +16,12 @@ from magicgui.widgets import (
 from qtpy.QtCore import QTimer
 from napari.qt.threading import thread_worker
 
+from ._chunking import (
+    ResultBuilder,
+    _get_axis_mapping,
+    _get_iter_spec,
+    _validate_data_shape,
+)
 from ._config import get_grid_params, load_config, save_config
 
 if TYPE_CHECKING:
@@ -92,28 +98,6 @@ class _WidgetBase(Container):
         self._cancel_button.visible = True
 
         self.out_layer = None
-
-    def _get_data(self, image_layer, is_3d: bool):
-        """Extract image data from layer, handling multiscale and RGB.
-
-        Args:
-            image_layer: napari Image layer
-            is_3d: whether to treat as 3D data
-
-        Returns:
-            reshaped image array
-        """
-        image_data = image_layer.data
-        if image_layer.multiscale:
-            image_data = image_data[0]
-        if image_layer.rgb:
-            img_dim = image_data.shape[-4:] if is_3d else image_data.shape[-3:]
-            image_data = image_data.reshape((-1,) + img_dim)
-        else:
-            img_dim = image_data.shape[-3:] if is_3d else image_data.shape[-2:]
-            image_data = image_data.reshape((-1,) + img_dim + (1,))
-
-        return image_data
 
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__()
@@ -343,55 +327,84 @@ class ImageProcessingWidget(_WidgetBase):
     def run(self):
         from ._grpc import grpc_process_image
 
+        settings = self._snapshot()
+        image_layer = settings["Image"]
+        op_name = settings["Op"]
+
+        # Get axis order from raw layer data (respects napari heuristics)
+        axis_order = _get_axis_mapping(image_layer, settings["3D"])
+
+        # Get hint from op schema
+        hint = None
+        if op_name in self._op_schemas:
+            hint = self._op_schemas[op_name].input_shape_hint
+
+        # Handle multiscale: use highest resolution level
+        image_data = image_layer.data
+        if image_layer.multiscale:
+            image_data = image_data[0]
+
+        # Compute iteration spec
+        iter_spec = _get_iter_spec(axis_order, hint)
+
+        # Validate
+        warnings = _validate_data_shape(image_data, axis_order, hint)
+        for w in warnings:
+            logger.warning(w)
+
+        # Prepare result builder and progress
+        result_builder = ResultBuilder(image_data.shape, iter_spec.iter_dims)
+        n_iterations = (
+            1
+            if not iter_spec.iter_dims
+            else int(
+                np.prod([image_data.shape[d] for d in iter_spec.iter_dims])
+            )
+        )
+
+        self._prepare()
+        self._progress_bar.max = n_iterations
+
         def _update(value):
-            if value.shape[-1] == 1:
-                value = value.squeeze(-1)
-            else:
-                value = np.moveaxis(value, -1, 0)
+            result_chunk, position, squeezed_dims = value
 
-            if self.out_layer is None:
-                name = self._image_layer_combo.value.name + "_label"
-                _output = np.zeros(
-                    [image_data.shape[0], *value.shape], dtype=value.dtype
-                )
-                if name in self._viewer.layers:
-                    self._viewer.layers[name].data = _output
-                else:
-                    self._viewer.add_image(_output, name=name)
-
-                self.out_layer = self._viewer.layers[name]
-
+            result_builder.add_result(position, result_chunk, squeezed_dims)
             self._progress_bar.increment()
-            self.out_layer.data[self.n_results, ...] = value
-            self.n_results += 1
 
-            self.out_layer.refresh()
+            if result_builder.buffer is not None:
+                if self.out_layer is None:
+                    name = image_layer.name + "_processed"
+                    if name in self._viewer.layers:
+                        self._viewer.layers[name].data = result_builder.buffer
+                    else:
+                        self._viewer.add_image(
+                            result_builder.buffer,
+                            name=name,
+                        )
+                    self.out_layer = self._viewer.layers[name]
+                    self.out_layer.reset_contrast_limits()
+                else:
+                    self.out_layer.data = result_builder.buffer
+                    self.out_layer.refresh()
 
         def _on_success():
             """Callback on successful completion - cleanup and save config."""
+            if self.out_layer is not None:
+                self.out_layer.reset_contrast_limits()
             self._cleanup()
             self._save_config()
 
-        self.n_results = 0
-        settings = self._snapshot()
-        image_layer = settings["Image"]
-
+        # Use dask_optimized_slicing for large images
         with image_layer.dask_optimized_slicing():
-            image_data = self._get_data(image_layer, settings["3D"])
+            worker = grpc_process_image(image_data, settings, iter_spec)
 
-            self._prepare()
+        self._cancel_callback = lambda: self._cancel(worker)
+        self._cancel_button.clicked.connect(self._cancel_callback)
+        worker.yielded.connect(_update)
+        worker.finished.connect(_on_success)
+        worker.errored.connect(self._error)
 
-            self._progress_bar.max = len(image_data)
-
-            worker = grpc_process_image(image_data, settings)
-
-            self._cancel_callback = lambda: self._cancel(worker)
-            self._cancel_button.clicked.connect(self._cancel_callback)
-            worker.yielded.connect(_update)
-            worker.finished.connect(_on_success)
-            worker.errored.connect(self._error)
-
-            worker.start()
+        worker.start()
 
 
 class ObjectDetectionWidget(_WidgetBase):
@@ -464,6 +477,28 @@ class ObjectDetectionWidget(_WidgetBase):
         """Toggle visibility of advanced settings widgets."""
         for ctl in self._hidden_elements:
             ctl.visible = self._use_advanced.value
+
+    def _get_data(self, image_layer, is_3d: bool):
+        """Extract image data from layer, handling multiscale and RGB.
+
+        Args:
+            image_layer: napari Image layer
+            is_3d: whether to treat as 3D data
+
+        Returns:
+            reshaped image array (batch, z/y, y, x, channel)
+        """
+        image_data = image_layer.data
+        if image_layer.multiscale:
+            image_data = image_data[0]
+        if image_layer.rgb:
+            img_dim = image_data.shape[-4:] if is_3d else image_data.shape[-3:]
+            image_data = image_data.reshape((-1,) + img_dim)
+        else:
+            img_dim = image_data.shape[-3:] if is_3d else image_data.shape[-2:]
+            image_data = image_data.reshape((-1,) + img_dim + (1,))
+
+        return image_data
 
     def _get_grid_positions(
         self, image, settings: dict

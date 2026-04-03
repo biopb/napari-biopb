@@ -59,35 +59,42 @@ class TestEncodeImage:
     """Tests for _encode_image function."""
 
     def test_2d_image_encoding(self):
-        """2D image (3D array) is encoded correctly."""
+        """2D image (3D array with YXC) is encoded correctly."""
         image = np.random.rand(100, 100, 1)  # 2D with channel
-        pixels = _encode_image(image, z_ratio=1.0)
+        pixels = _encode_image(image, np_index_order="YXC", z_ratio=1.0)
 
         # Should add batch dimension
         # Result is a protobuf Pixels object
         assert pixels is not None
 
     def test_3d_image_encoding(self):
-        """3D image (4D array) is encoded correctly."""
+        """3D image (4D array with ZYXC) is encoded correctly."""
         image = np.random.rand(10, 100, 100, 1)  # 3D with channel
-        pixels = _encode_image(image, z_ratio=2.0)
+        pixels = _encode_image(image, np_index_order="ZYXC", z_ratio=2.0)
+
+        assert pixels is not None
+
+    def test_grayscale_encoding(self):
+        """Grayscale image (2D array with YX) is encoded correctly."""
+        image = np.random.rand(100, 100)  # 2D grayscale
+        pixels = _encode_image(image, np_index_order="YX", z_ratio=1.0)
 
         assert pixels is not None
 
     def test_invalid_dimensions_raises(self):
         """Invalid image dimensions raise ValueError."""
-        # 2D without channel (wrong shape)
-        image = np.random.rand(100, 100)
+        # 2D without matching np_index_order
+        image = np.random.rand(100, 100)  # 2D array
 
-        with pytest.raises(ValueError, match="must be 2D or 3D"):
-            _encode_image(image)
+        with pytest.raises(ValueError, match="must have 3 dimensions"):
+            _encode_image(image, np_index_order="YXC")  # expects 3 dims
 
     def test_5d_image_raises(self):
-        """5D image raises ValueError."""
+        """5D image with wrong np_index_order raises ValueError."""
         image = np.random.rand(2, 10, 100, 100, 1)
 
-        with pytest.raises(ValueError, match="must be 2D or 3D"):
-            _encode_image(image)
+        with pytest.raises(ValueError, match="must have 4 dimensions"):
+            _encode_image(image, np_index_order="ZYXC")  # expects 4 dims
 
 
 class TestGetDetectionSettings:

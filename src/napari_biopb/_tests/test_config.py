@@ -1,9 +1,6 @@
 """Tests for _config.py configuration management."""
 
-import copy
 import json
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pytest

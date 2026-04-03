@@ -10,6 +10,8 @@ from google.protobuf import empty_pb2, struct_pb2
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 from napari.qt.threading import thread_worker
 
+from ._chunking import IterationSpec, _data_iterator
+
 from ._config import load_config
 from ._render import _adjust_response_offset, _generate_label
 from ._typing import napari_data
@@ -64,26 +66,31 @@ def struct_to_dict(s: struct_pb2.Struct) -> dict:
     return dict(s)
 
 
-def _encode_image(image: np.ndarray, z_ratio: float = 1.0):
+def _encode_image(
+    image: np.ndarray, np_index_order: str = "YXC", z_ratio: float = 1.0
+):
     """Encode numpy image array to protobuf Pixels format.
 
     Args:
-        image: Input image array (must be 2D or 3D with channel dimension)
+        image: Input image array (must match np_index_order specification)
+        np_index_order: Axis order string (e.g., "YXC", "ZYXC", "YX", "ZYX")
         z_ratio: Z aspect ratio for 3D images
 
     Returns:
         protobuf Pixels object
 
     Raises:
-        ValueError: If image dimensions are invalid
+        ValueError: If image dimensions don't match np_index_order
     """
-    if image.ndim not in (3, 4):
+    expected_ndim = len(np_index_order)
+    if image.ndim != expected_ndim:
         raise ValueError(
-            f"Image must be 2D or 3D with channel dimension. Got shape {image.shape} with {image.ndim} dimensions"
+            f"Image must have {expected_ndim} dimensions for np_index_order '{np_index_order}'. "
+            f"Got shape {image.shape} with {image.ndim} dimensions"
         )
 
-    if image.ndim == 3:
-        image = image[None, ...]
+    # Add batch dimension (B, ...) for serialize_from_numpy
+    image = image[None, ...]
 
     pixels = serialize_from_numpy(
         image,
@@ -99,7 +106,22 @@ def _object_detection_build_request(
     image: np.ndarray, settings: dict
 ) -> proto.DetectionRequest:
     """Serialize a np image array as ImageData protobuf."""
-    pixels = _encode_image(image, settings["Z Aspect Ratio"])
+    # Determine np_index_order from image shape
+    # Object detection expects YXC (2D) or ZYXC (3D)
+    if image.ndim == 3:
+        np_index_order = "YXC"
+    elif image.ndim == 4:
+        np_index_order = "ZYXC"
+    else:
+        raise ValueError(
+            f"Object detection image must have 3 or 4 dimensions. Got {image.ndim}"
+        )
+
+    pixels = _encode_image(
+        image,
+        np_index_order=np_index_order,
+        z_ratio=settings["Z Aspect Ratio"],
+    )
 
     request = proto.DetectionRequest(
         image_data=proto.ImageData(pixels=pixels),
@@ -297,37 +319,29 @@ def grpc_object_detection(
 def grpc_process_image(
     image_data: napari_data,
     settings: dict,
-    grid_positions: Optional[list] = None,
-) -> Generator[np.ndarray, None, None]:
-    """Run image processing via gRPC.
+    iter_spec: IterationSpec,
+) -> Generator[Tuple[np.ndarray, dict, list], None, None]:
+    """Run image processing via gRPC with dimensional iteration.
 
     Args:
-        image_data: Input image(s) as dask array or numpy array
+        image_data: Input image(s) as dask array or numpy array (raw, not reshaped)
         settings: Widget settings dict (includes 'Op' and kwargs)
-        grid_positions: Not implemented for image processing
+        iter_spec: IterationSpec with iter_dims and axis_order
 
     Yields:
-        Processed image array for each input image
+        Tuple of (result_chunk, position, squeezed_dims) for each iteration
+        - result_chunk: Processed image array
+        - position: Dict mapping iter_dims to indices
+        - squeezed_dims: List of dims that were squeezed before sending
 
     Raises:
-        ValueError: If image dimensions don't match expected format or grid_positions is provided
+        ValueError: If grid_positions is provided (not supported)
     """
-    is3d = settings["3D"]
-    expected_ndim = 5 if is3d else 4
-    if image_data.ndim != expected_ndim:
-        raise ValueError(
-            f"For {'3D' if is3d else '2D'} mode, image data must have {expected_ndim} dimensions "
-            f"(batch, {'z,' if is3d else ''}y, x, channel). Got shape {image_data.shape} with {image_data.ndim} dimensions"
-        )
-
-    if grid_positions is not None:
-        raise ValueError(
-            "Grid processing is not supported for image processing. Use object detection instead."
-        )
-
     # Get timeout from config
     config = load_config()
-    timeout = config["timeout"]["detection_3d" if is3d else "detection_2d"]
+    timeout = config["timeout"][
+        "detection_3d" if "Z" in iter_spec.axis_order else "detection_2d"
+    ]
 
     server = settings["Server"]
     logger.info("Starting image processing on %s", server)
@@ -336,29 +350,38 @@ def grpc_process_image(
     op_name = settings.get("Op", "")
     kwargs = _extract_kwargs(settings)
 
+    squeezed_dims = iter_spec.iter_dims if iter_spec.iter_dims else []
+
     # call server
     with _get_grpc_channel(settings) as channel:
         stub = proto.ProcessImageStub(channel)
 
-        for image in image_data:
-            image = np.array(image)
+        # Iterate over data using _data_iterator
+        for position, chunk in _data_iterator(image_data, iter_spec.iter_dims):
+            chunk = np.array(chunk)
+            pixels = serialize_from_numpy(
+                chunk, np_index_order=iter_spec.axis_order
+            )
+
             response = stub.Run(
                 proto.ProcessRequest(
-                    image_data=proto.ImageData(pixels=_encode_image(image)),
+                    image_data=proto.ImageData(pixels=pixels),
                     op_name=op_name,
                     kwargs=dict_to_struct(kwargs),
                 ),
                 timeout=timeout,
             )
 
-            output = deserialize_to_numpy(response.image_data.pixels)
-            # if output.shape[-1] == 1:
-            #     output = output.squeeze(-1)
-            if not settings["3D"]:
-                output = output.squeeze(0)
+            output = deserialize_to_numpy(
+                response.image_data.pixels, np_index_order=iter_spec.axis_order
+            )
 
-            logger.debug("Processed image, output shape: %s", output.shape)
-            yield output
+            # Ensure native byte order (upstream deserialize_to_numpy does not guarantee native byte order)
+            output = output.astype(output.dtype.type)
+
+            logger.debug("Processed chunk, output shape: %s", output.shape)
+
+            yield output, position, squeezed_dims
 
 
 def _extract_kwargs(settings: dict) -> dict:
