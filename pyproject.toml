@@ -29,7 +29,7 @@ dependencies = [
     "magicgui",
     "qtpy",
     "scikit-image",
-    "biopb >= 0.2.0",
+    "biopb >= 0.3.0",
     "opencv-python-headless",
     "grpcio_tools",
     "grpcio-health-checking",
@@ -76,7 +76,7 @@ version_file = "src/napari_biopb/_version.py"
 
 
 [tool.pytest.ini_options]
-qt_api = "pyqt5"
+qt_api = "pyqt6"
 addopts = "--ignore-glob='*_vendor*'"
 
 [tool.pytest_env]

@@ -11,6 +11,7 @@ from magicgui.widgets import (
     SpinBox,
 )
 from qtpy.QtCore import QTimer
+from qtpy.QtWidgets import QSizePolicy
 from napari.qt.threading import thread_worker
 
 from ._chunking import (
@@ -45,15 +46,16 @@ class ImageProcessingWidget(_WidgetBase):
             visible=False,  # Hidden until valid schema is loaded
         )
 
-        # Description label for the selected op (multiline with word wrap)
+        # Description display for the selected op (multiline with word wrap)
         self._op_description = Label(value="", label="")
         self._op_description.visible = False
-        # Enable word wrap and expanding width to follow container size
+        # Configure for Qt6 multiline with proper height adjustment
         self._op_description.native.setWordWrap(True)
         self._op_description.native.setSizePolicy(
-            7,  # QSizePolicy.Expanding - width follows container
-            0,  # QSizePolicy.Fixed - height adjusts to content
+            QSizePolicy.Preferred,
+            QSizePolicy.Preferred,
         )
+        self._op_description.native.setMaximumHeight(250)
 
         # Container for dynamically generated kwargs widgets
         self._kwargs_container = Container(label="Kwargs", visible=False)
@@ -191,6 +193,8 @@ class ImageProcessingWidget(_WidgetBase):
         # Show description if available
         if schema.description:
             self._op_description.value = schema.description
+            # Force Qt to recalculate height for wrapped text
+            self._op_description.native.adjustSize()
             self._op_description.visible = True
         else:
             self._op_description.visible = False
