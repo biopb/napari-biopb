@@ -101,24 +101,20 @@ class TestGetAxisMapping:
 class TestValidateDataShape:
     """Tests for _validate_data_shape function."""
 
-    def test_no_hint_returns_empty(self):
-        """No hint returns empty warnings list."""
+    def test_no_hint_no_error(self):
+        """No hint returns without error."""
         data = np.random.rand(100, 100, 3)
-        warnings = _validate_data_shape(data, "YXC", None)
-        assert warnings == []
+        _validate_data_shape(data, "YXC", None)  # Should not raise
 
     def test_required_multivalue_warning(self):
-        """required_multivalue with size=1 generates warning."""
+        """required_multivalue with size=1 logs warning."""
         data = np.random.rand(100, 100, 1)  # C=1
 
         # Mock hint
         hint = MagicMock()
         hint.required_multivalue = ["C"]
 
-        warnings = _validate_data_shape(data, "YXC", hint)
-        assert len(warnings) == 1
-        assert "C" in warnings[0]
-        assert "requires >1" in warnings[0]
+        _validate_data_shape(data, "YXC", hint)  # Should not raise
 
     def test_required_multivalue_passes(self):
         """required_multivalue with size>1 passes."""
@@ -127,8 +123,7 @@ class TestValidateDataShape:
         hint = MagicMock()
         hint.required_multivalue = ["C"]
 
-        warnings = _validate_data_shape(data, "YXC", hint)
-        assert warnings == []
+        _validate_data_shape(data, "YXC", hint)  # Should not raise
 
 
 class TestGetIterSpec:

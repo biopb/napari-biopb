@@ -43,6 +43,7 @@ testing = [
     "pytest",  # https://docs.pytest.org/en/latest/contents.html
     "pytest-cov",  # https://pytest-cov.readthedocs.io/en/latest/
     "pytest-qt",  # https://pytest-qt.readthedocs.io/en/latest/
+    "pytest-env",  # https://github.com/qwertyquerty/pytest-env
     "napari",
     "pyqt5",
 ]
@@ -77,6 +78,9 @@ version_file = "src/napari_biopb/_version.py"
 [tool.pytest.ini_options]
 qt_api = "pyqt5"
 addopts = "--ignore-glob='*_vendor*'"
+
+[tool.pytest_env]
+QT_QPA_PLATFORM = "offscreen"
 
 [tool.black]
 line-length = 79

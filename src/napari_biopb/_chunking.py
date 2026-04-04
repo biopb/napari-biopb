@@ -87,7 +87,7 @@ def _validate_data_shape(
             logger.warning(
                 f"Service requires multivalue axis '{axis_name}' but it's not present in data"
             )
-        elif axis_order[axis_name] == 1:
+        elif data.shape[axis_order.index(axis_name)] == 1:
             logger.warning(
                 f"Dimension '{axis_name}' has size 1 but service requires >1"
             )
