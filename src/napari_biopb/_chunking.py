@@ -11,9 +11,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+FULL_ORDER = "TZCYX"
+
 
 class IterationSpec(NamedTuple):
-    iter_dims: list  # Numeric dims to iterate (empty if no iteration)
+    iter_dims: set[str]  # Axis names to iterate (e.g., {"T", "Z"}, empty set if no iteration)
     axis_order: str  # Full axis order for serialization (e.g., "TZYXC")
 
 
@@ -119,12 +121,11 @@ def _get_iter_spec(
     # Step 3: Remove any axes not present in axis_order
     submission_axes &= set(axis_order)
 
-    logger.debug(f"_get_iter_spec: submission_axes='{submission_axes}'")
+    logger.debug(f"_get_iter_spec: submission_axes={submission_axes}")
 
     # Step 4: Remaining axes are iter_dims
-    iter_axes = set(axis_order) - set(submission_axes)
-    iter_dims = sorted([axis_order.index(ax) for ax in iter_axes])
-    logger.debug(f"_get_iter_spec: iter_axes={iter_axes}")
+    iter_dims = set(axis_order) - submission_axes
+    logger.debug(f"_get_iter_spec: iter_dims={iter_dims}")
 
     return IterationSpec(
         iter_dims=iter_dims,
@@ -132,25 +133,29 @@ def _get_iter_spec(
     )
 
 
-def _data_iterator(data: np.ndarray, iter_dims: Optional[list]):
-    """Iterate over data slices for given dims.
+def _data_iterator(data: np.ndarray, iter_dims: set[str], axis_order: str):
+    """Iterate over data slices for given axis names.
 
     Args:
         data: Image data array
-        iter_dims: List of dim indices to iterate, or None/empty
+        iter_dims: Set of axis names to iterate (e.g., {"T", "Z"}, empty set if none)
+        axis_order: Full axis order string (e.g., "TZYXC")
 
     Yields:
-        (position_dict, sliced_data) where position_dict maps iter_dims to indices
+        (position_dict, sliced_data) where position_dict maps numeric dim indices to values
     """
     if not iter_dims:
         yield {}, data
         return
 
+    # Convert axis names to numeric indices
+    iter_indices = [axis_order.index(ax) for ax in iter_dims]
+
     # Build shape for iteration dims only
-    iter_shape = tuple(data.shape[d] for d in iter_dims)
+    iter_shape = tuple(data.shape[idx] for idx in iter_indices)
 
     for idx_tuple in np.ndindex(iter_shape):
-        position = dict(zip(iter_dims, idx_tuple))
+        position = dict(zip(iter_indices, idx_tuple))
 
         # Build slices: iterate dims get single index, others get full slice
         slices = [slice(None)] * data.ndim
@@ -161,74 +166,63 @@ def _data_iterator(data: np.ndarray, iter_dims: Optional[list]):
 
 
 class ResultBuilder:
-    """Lazy result buffer construction."""
+    """Lazy result buffer construction for 5D TZCYX output."""
 
-    def __init__(self, original_shape: tuple, iter_dims: Optional[list]):
-        self.original_shape = original_shape
-        self.iter_dims = iter_dims
+    def __init__(self, iter_spec: IterationSpec, original_shape: tuple):
+        self.iter_spec = iter_spec  # Store full iter_spec
+        self.original_shape = original_shape  # Input shape (may be 2D-5D)
         self.buffer = None
         self.dtype = None
 
-    def add_result(
-        self, position: dict, chunk: np.ndarray, squeezed_dims: list
-    ):
+    def add_result(self, position: dict, chunk: np.ndarray):
         """Add result chunk to buffer.
 
         Args:
-            position: Dict mapping iter_dims to indices
-            chunk: Result chunk array (may have squeezed dims removed)
-            squeezed_dims: Dims that were squeezed before sending
+            position: Dict mapping numeric dim indices to index values
+            chunk: Result chunk array (5D TZCYX from server)
         """
         logger.debug(
-            f"Adding chunk with shape {chunk.shape} at position {position} and squeezed_dims {squeezed_dims}"
+            f"Adding chunk with shape {chunk.shape} at position {position}"
         )
 
         if self.buffer is None:
-            output_shape = self._infer_output_shape(chunk, squeezed_dims)
+            output_shape = self._infer_output_shape(chunk)
             self.dtype = chunk.dtype
             self.buffer = np.zeros(output_shape, dtype=self.dtype)
+            logger.debug(f"Created buffer with shape {output_shape}")
 
-        placement_slices = self._build_placement_slices(
-            position, squeezed_dims
-        )
+        placement_slices = self._build_placement_slices(position)
         self.buffer[placement_slices] = chunk
 
-    def _infer_output_shape(
-        self, chunk: np.ndarray, squeezed_dims: list
-    ) -> tuple:
-        """Infer output buffer shape from first chunk.
+    def _infer_output_shape(self, chunk: np.ndarray) -> tuple:
+        """Infer output buffer shape from first chunk (5D TZCYX).
 
-        The output shape uses:
-        - original_shape for iterated dimensions (we place each result at position)
-        - chunk.shape for non-iterated dimensions (server output may differ)
+        Three cases for each axis in TZCYX:
+        1. Axis in iter_dims: use original input shape (number of tiles)
+        2. Axis present in chunk: use chunk size (server output)
+        3. Else: set to 1
         """
         output_shape = []
-        for i, (orig_dim, chunk_dim) in enumerate(
-            zip(self.original_shape, chunk.shape)
-        ):
-            if i in squeezed_dims:
-                output_shape.append(
-                    orig_dim
-                )  # Iter dim: preserve original size
+        for full_idx, axis_name in enumerate(FULL_ORDER):
+            if axis_name in self.iter_spec.iter_dims:
+                # Iterated axis - use original input size
+                input_idx = self.iter_spec.axis_order.index(axis_name)
+                output_shape.append(self.original_shape[input_idx])
             else:
-                output_shape.append(
-                    chunk_dim
-                )  # Non-iter: use server output size
+                output_shape.append(chunk.shape[full_idx])
+
         return tuple(output_shape)
 
-    def _build_placement_slices(
-        self, position: dict, squeezed_dims: list
-    ) -> tuple:
-        """Build slice tuple for placing chunk in buffer."""
-        slices = []
-        for i in range(len(self.original_shape)):
-            if i in position:
-                # Iteration dim: place at specific index
-                slices.append(slice(position[i], position[i] + 1))
-            else:
-                # Non-iteration dim: full slice
-                slices.append(slice(None))
+    def _build_placement_slices(self, position: dict) -> tuple:
+        """Build slice tuple for placing chunk in 5D buffer.
 
+        position maps numeric dim indices (in axis_order) to index values.
+        """
+        slices = [slice(None)] * 5  # 5D buffer
+        for input_dim_idx, idx in position.items():
+            axis_name = self.iter_spec.axis_order[input_dim_idx]
+            full_idx = FULL_ORDER.index(axis_name)
+            slices[full_idx] = slice(idx, idx + 1)
         return tuple(slices)
 
     def get_result(self) -> np.ndarray:

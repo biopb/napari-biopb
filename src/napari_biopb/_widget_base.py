@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from magicgui.widgets import ComboBox, Container, ProgressBar, create_widget
@@ -62,6 +63,7 @@ class _WidgetBase(Container):
         Args:
             worker: The thread worker to cancel
         """
+        self._abort_event.set()
         worker.quit()
         self._cancel_button.enabled = False
         # Wait for worker to finish with timeout to prevent indefinite blocking
@@ -70,6 +72,8 @@ class _WidgetBase(Container):
 
     def _prepare(self):
         """Prepare widget state before processing starts."""
+        self._abort_event.clear()
+
         self._progress_bar.visible = True
         self._progress_bar.value = 0
 
@@ -85,6 +89,7 @@ class _WidgetBase(Container):
         super().__init__()
         self._viewer = viewer
         self._cancel_callback = None
+        self._abort_event = threading.Event()
 
         # Load persisted config
         self._config = load_config()

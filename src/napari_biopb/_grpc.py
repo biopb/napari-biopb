@@ -1,5 +1,7 @@
 import logging
 import re
+import threading
+import time
 from typing import Generator, Optional, Tuple
 
 import biopb.image as proto
@@ -10,7 +12,7 @@ from google.protobuf import empty_pb2, struct_pb2
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 from napari.qt.threading import thread_worker
 
-from ._chunking import IterationSpec, _data_iterator
+from ._chunking import FULL_ORDER, IterationSpec, _data_iterator
 
 from ._config import load_config
 from ._render import _adjust_response_offset, _generate_label
@@ -305,6 +307,7 @@ def grpc_object_detection(
     image_data: napari_data,
     settings: dict,
     grid_positions: list,
+    abort_event: Optional[threading.Event] = None,
 ) -> Generator[np.ndarray, None, None]:
     """Run object detection on image data via gRPC.
 
@@ -312,6 +315,7 @@ def grpc_object_detection(
         image_data: Input image(s) as dask array or numpy array
         settings: Widget settings dict
         grid_positions: List of slice tuples for patch positions
+        abort_event: Optional threading.Event to signal cancellation
 
     Yields:
         None for progress updates, then label array for each image
@@ -343,15 +347,27 @@ def grpc_object_detection(
             response = proto.DetectionResponse()
 
             for grid in grid_positions:
+                # Check for abort before processing each patch
+                if abort_event is not None and abort_event.is_set():
+                    logger.info("Object detection aborted by user")
+                    return
+
                 logger.debug("Processing patch %s", grid)
 
                 patch = np.array(image.__getitem__(grid))
 
-                patch_response = stub.RunDetection(
-                    _object_detection_build_request(patch, settings),
-                    timeout=timeout,
-                )
+                request = _object_detection_build_request(patch, settings)
+                future = stub.RunDetection.future(request)
 
+                # Poll for abort while waiting for response
+                while not future.done():
+                    if abort_event is not None and abort_event.is_set():
+                        future.cancel()
+                        logger.info("gRPC RunDetection call cancelled")
+                        return
+                    time.sleep(0.05)
+
+                patch_response = future.result(timeout=timeout)
                 patch_response = _adjust_response_offset(patch_response, grid)
 
                 logger.debug(
@@ -375,22 +391,23 @@ def grpc_process_image(
     image_data: napari_data,
     settings: dict,
     iter_spec: IterationSpec,
-) -> Generator[Tuple[np.ndarray, dict, list], None, None]:
+    abort_event: Optional[threading.Event] = None,
+) -> Generator[Tuple[np.ndarray, dict], None, None]:
     """Run image processing via gRPC with dimensional iteration.
 
     Args:
         image_data: Input image(s) as dask array or numpy array (raw, not reshaped)
         settings: Widget settings dict (includes 'Op' and kwargs)
-        iter_spec: IterationSpec with iter_dims and axis_order
+        iter_spec: IterationSpec with iter_dims (set of axis names) and axis_order
+        abort_event: Optional threading.Event to signal cancellation
 
     Yields:
-        Tuple of (result_chunk, position, squeezed_dims) for each iteration
-        - result_chunk: Processed image array
-        - position: Dict mapping iter_dims to indices
-        - squeezed_dims: List of dims that were squeezed before sending
+        Tuple of (result_chunk, position) for each iteration
+        - result_chunk: Processed image array (5D TZCYX)
+        - position: Dict mapping numeric dim indices to index values
 
     Raises:
-        ValueError: If grid_positions is provided (not supported)
+        ValueError: If operation changes iterated dimensions from singleton
     """
     # Get timeout from config
     config = load_config()
@@ -405,38 +422,62 @@ def grpc_process_image(
     op_name = settings.get("Op", "")
     kwargs = _extract_kwargs(settings)
 
-    squeezed_dims = iter_spec.iter_dims if iter_spec.iter_dims else []
-
     # call server
     with _get_grpc_channel(settings) as channel:
         stub = proto.ProcessImageStub(channel)
 
         # Iterate over data using _data_iterator
-        for position, chunk in _data_iterator(image_data, iter_spec.iter_dims):
+        for position, chunk in _data_iterator(
+            image_data, iter_spec.iter_dims, iter_spec.axis_order
+        ):
+            # Check for abort before processing each chunk
+            if abort_event is not None and abort_event.is_set():
+                logger.info("Image processing aborted by user")
+                return
+
             chunk = np.array(chunk)
             pixels = serialize_from_numpy(
                 chunk, np_index_order=iter_spec.axis_order
             )
 
-            response = stub.Run(
-                proto.ProcessRequest(
-                    image_data=proto.ImageData(pixels=pixels),
-                    op_name=op_name,
-                    kwargs=dict_to_struct(kwargs),
-                ),
-                timeout=timeout,
+            request = proto.ProcessRequest(
+                image_data=proto.ImageData(pixels=pixels),
+                op_name=op_name,
+                kwargs=dict_to_struct(kwargs),
             )
 
+            future = stub.Run.future(request)
+
+            # Poll for abort while waiting for response
+            while not future.done():
+                if abort_event is not None and abort_event.is_set():
+                    future.cancel()
+                    logger.info("gRPC Run call cancelled")
+                    return
+                time.sleep(0.05)
+
+            response = future.result(timeout=timeout)
+
+            # Always decode with full 5D axis order
             output = deserialize_to_numpy(
-                response.image_data.pixels, np_index_order=iter_spec.axis_order
+                response.image_data.pixels, np_index_order="TZCYX"
             )
-
-            # Ensure native byte order (upstream deserialize_to_numpy does not guarantee native byte order)
+            # Ensure native byte order
             output = output.astype(output.dtype.type)
+
+            # Validate: all iter dims must be singleton in output
+            for axis_name in iter_spec.iter_dims:
+                full_idx = FULL_ORDER.index(axis_name)
+                if output.shape[full_idx] != 1:
+                    raise ValueError(
+                        f"Operation changed iterated dimension '{axis_name}' "
+                        f"from 1 to {output.shape[full_idx]}. "
+                        f"Cannot tile results when operation modifies iterated dimensions."
+                    )
 
             logger.debug("Processed chunk, output shape: %s", output.shape)
 
-            yield output, position, squeezed_dims
+            yield output, position
 
 
 def _extract_kwargs(settings: dict) -> dict:

@@ -130,9 +130,9 @@ class TestGetIterSpec:
     """Tests for _get_iter_spec function."""
 
     def test_no_hint_returns_empty_iter_dims(self):
-        """No hint returns empty iter_dims."""
+        """No hint returns empty iter_dims set."""
         spec = _get_iter_spec("YXC", None)
-        assert spec.iter_dims == []
+        assert spec.iter_dims == set()
         assert spec.axis_order == "YXC"
 
     def test_expected_singletons(self):
@@ -142,12 +142,8 @@ class TestGetIterSpec:
         hint.required_multivalue = []
 
         spec = _get_iter_spec("YXC", hint)
-        assert spec.iter_dims == [
-            2
-        ]  # C removed from submission, becomes iter_dim
-        assert (
-            spec.axis_order == "YXC"
-        )  # Full order preserved for serialization
+        assert spec.iter_dims == {"C"}  # C removed from submission, becomes iter_dim
+        assert spec.axis_order == "YXC"
 
     def test_required_multivalue(self):
         """required_multivalue ensures axis stays in submission."""
@@ -156,13 +152,13 @@ class TestGetIterSpec:
         hint.required_multivalue = ["T"]  # T must be in submission
 
         spec = _get_iter_spec("TYXC", hint)
-        assert spec.iter_dims == []  # T in submission, no iteration
+        assert spec.iter_dims == set()  # T in submission, no iteration
 
     def test_axis_order_preserved(self):
         """axis_order preserves full axis order, T becomes iter_dim if not in default submission."""
         spec = _get_iter_spec("TZYXC", None)
         assert spec.axis_order == "TZYXC"
-        assert spec.iter_dims == [0]  # T not in default ZYXC
+        assert spec.iter_dims == {"T"}  # T not in default ZYXC
 
 
 class TestDataIterator:
@@ -171,7 +167,7 @@ class TestDataIterator:
     def test_no_iter_dims_yields_once(self):
         """No iter_dims yields full data once."""
         data = np.random.rand(100, 100, 3)
-        results = list(_data_iterator(data, None))
+        results = list(_data_iterator(data, set(), "YXC"))
         assert len(results) == 1
         position, chunk = results[0]
         assert position == {}
@@ -180,29 +176,20 @@ class TestDataIterator:
     def test_single_iter_dim(self):
         """Single iter_dim iterates over that dimension."""
         data = np.random.rand(100, 100, 3)
-        results = list(_data_iterator(data, [2]))  # Iterate over C
+        results = list(_data_iterator(data, {"C"}, "YXC"))  # Iterate over C
         assert len(results) == 3  # 3 channels
         for i, (position, chunk) in enumerate(results):
-            assert position == {2: i}
+            assert position == {2: i}  # C is at index 2 in "YXC"
             assert chunk.shape == (100, 100, 1)
 
     def test_multi_iter_dims(self):
-        """Multiple iter_dims iterates in correct order."""
+        """Multiple iter_dims iterates over all combinations."""
         data = np.random.rand(2, 3, 100, 100)  # T, Z, Y, X
-        results = list(_data_iterator(data, [0, 1]))  # Iterate over T and Z
+        results = list(_data_iterator(data, {"T", "Z"}, "TZYX"))  # Iterate over T and Z
         assert len(results) == 6  # 2 * 3
 
-        # Check order (ndindex iterates in row-major order)
-        expected_positions = [
-            {0: 0, 1: 0},
-            {0: 0, 1: 1},
-            {0: 0, 1: 2},
-            {0: 1, 1: 0},
-            {0: 1, 1: 1},
-            {0: 1, 1: 2},
-        ]
-        for i, (position, chunk) in enumerate(results):
-            assert position == expected_positions[i]
+        # Each result should have singleton T and Z
+        for position, chunk in results:
             assert chunk.shape == (1, 1, 100, 100)
 
 
@@ -211,43 +198,50 @@ class TestResultBuilder:
 
     def test_single_result(self):
         """Single result builds buffer correctly."""
-        builder = ResultBuilder((100, 100, 3), None)
-        chunk = np.random.rand(100, 100, 3)
-        builder.add_result({}, chunk, [])
+        iter_spec = IterationSpec(iter_dims=set(), axis_order="YXC")
+        builder = ResultBuilder(iter_spec, (1, 1, 1, 100, 100))
+        # Chunk is 5D TZCYX
+        chunk = np.random.rand(1, 1, 1, 100, 100)
+        builder.add_result({}, chunk)
         result = builder.get_result()
-        assert result.shape == (100, 100, 3)
+        assert result.shape == (1, 1, 1, 100, 100)
         np.testing.assert_array_equal(result, chunk)
 
     def test_multiple_results(self):
         """Multiple results assemble correctly."""
-        builder = ResultBuilder(
-            (3, 100, 100, 1), [0]
-        )  # Iterate over first dim
+        # Iterate over T: original has T=3, Y=100, X=100, C=1
+        iter_spec = IterationSpec(iter_dims={"T"}, axis_order="TYXC")
+        builder = ResultBuilder(iter_spec, (3, 100, 100))
         for i in range(3):
-            chunk = np.ones((1, 100, 100, 1)) * i  # Size 1 at iter_dim
-            builder.add_result({0: i}, chunk, [0])
+            # Chunk is 5D TZCYX with T=1 (iterated)
+            chunk = np.ones((1, 1, 1, 100, 100)) * i
+            builder.add_result({0: i}, chunk)  # T is at index 0 in "TYXC"
         result = builder.get_result()
-        assert result.shape == (3, 100, 100, 1)
+        # Output shape: T=3 (original), Z=1, C=1, Y=100, X=100 from chunk
+        assert result.shape == (3, 1, 1, 100, 100)
         for i in range(3):
-            np.testing.assert_array_equal(result[i, :, :, :], i)
+            np.testing.assert_array_equal(result[i, :, :, :, :], i)
 
     def test_infer_output_shape(self):
         """Output shape is inferred from first chunk."""
-        builder = ResultBuilder((2, 10, 100, 100), [0, 1])
-        # Iter dims [0,1] have size 1 in chunk, non-iter dims keep their size
-        chunk = np.random.rand(1, 1, 100, 100)
-        builder.add_result({0: 0, 1: 0}, chunk, [0, 1])
+        # Iterate over T and Z: original has T=2, Z=10, Y=100, X=100
+        iter_spec = IterationSpec(iter_dims={"T", "Z"}, axis_order="TZYX")
+        builder = ResultBuilder(iter_spec, (2, 10, 100, 100))
+        # Chunk is 5D TZCYX with T=1, Z=1 (iterated)
+        chunk = np.random.rand(1, 1, 1, 100, 100)
+        builder.add_result({0: 0, 1: 0}, chunk)
         assert builder.buffer is not None
-        assert builder.buffer.shape == (2, 10, 100, 100)
+        # Output: T=2 (orig), Z=10 (orig), C=1 (chunk), Y=100 (chunk), X=100 (chunk)
+        assert builder.buffer.shape == (2, 10, 1, 100, 100)
 
     def test_infer_output_shape_non_iter_dim_size_one(self):
         """Non-iter dimension with size 1 uses chunk size, not original."""
-        # Edge case: C dim is non-iter but has size 1 in server output
-        builder = ResultBuilder((10, 100, 100, 3), [0])  # Iterate Z
-        chunk = np.random.rand(
-            1, 50, 50, 1
-        )  # Server downsamples Y,X and returns C=1
-        builder.add_result({0: 0}, chunk, [0])
+        # Edge case: iterate over T, server returns different Y/X and C=1
+        iter_spec = IterationSpec(iter_dims={"T"}, axis_order="TYXC")
+        builder = ResultBuilder(iter_spec, (10, 100, 100, 3))
+        # Chunk is 5D TZCYX: T=1 (iter), Z=1, C=1, Y=50, X=50 (server downsamples)
+        chunk = np.random.rand(1, 1, 1, 50, 50)
+        builder.add_result({0: 0}, chunk)
         assert builder.buffer is not None
-        # Z uses original (10), Y/X/C use chunk size (50, 50, 1)
-        assert builder.buffer.shape == (10, 50, 50, 1)
+        # T uses original (10), Z/C/Y/X use chunk size (1, 1, 50, 50)
+        assert builder.buffer.shape == (10, 1, 1, 50, 50)

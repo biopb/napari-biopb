@@ -194,7 +194,7 @@ class ObjectDetectionWidget(_WidgetBase):
             self._prepare()
 
             worker = grpc_object_detection(
-                image_data, settings, grid_positions
+                image_data, settings, grid_positions, abort_event=self._abort_event
             )
 
             self._cancel_callback = lambda: self._cancel(worker)

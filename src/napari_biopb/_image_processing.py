@@ -15,6 +15,7 @@ from qtpy.QtWidgets import QSizePolicy
 from napari.qt.threading import thread_worker
 
 from ._chunking import (
+    FULL_ORDER,
     ResultBuilder,
     _get_axis_mapping,
     _get_iter_spec,
@@ -278,12 +279,12 @@ class ImageProcessingWidget(_WidgetBase):
         _validate_data_shape(image_data, axis_order, hint)
 
         # Prepare result builder and progress
-        result_builder = ResultBuilder(image_data.shape, iter_spec.iter_dims)
+        result_builder = ResultBuilder(iter_spec, image_data.shape)
         n_iterations = (
             1
             if not iter_spec.iter_dims
             else int(
-                np.prod([image_data.shape[d] for d in iter_spec.iter_dims])
+                np.prod([image_data.shape[axis_order.index(ax)] for ax in iter_spec.iter_dims])
             )
         )
 
@@ -291,25 +292,27 @@ class ImageProcessingWidget(_WidgetBase):
         self._progress_bar.max = n_iterations
 
         def _update(value):
-            result_chunk, position, squeezed_dims = value
+            result_chunk, position = value
 
-            result_builder.add_result(position, result_chunk, squeezed_dims)
+            result_builder.add_result(position, result_chunk)
             self._progress_bar.increment()
 
             if result_builder.buffer is not None:
+                # Prepare data for viewer (handle RGB, squeeze singletons)
+                output_data = _prepare_for_viewer(result_builder.buffer)
                 if self.out_layer is None:
                     name = image_layer.name + "_processed"
                     if name in self._viewer.layers:
-                        self._viewer.layers[name].data = result_builder.buffer
+                        self._viewer.layers[name].data = output_data
                     else:
                         self._viewer.add_image(
-                            result_builder.buffer,
+                            output_data,
                             name=name,
                         )
                     self.out_layer = self._viewer.layers[name]
                     self.out_layer.reset_contrast_limits()
                 else:
-                    self.out_layer.data = result_builder.buffer
+                    self.out_layer.data = output_data
                     self.out_layer.refresh()
 
         def _on_success():
@@ -321,7 +324,9 @@ class ImageProcessingWidget(_WidgetBase):
 
         # Use dask_optimized_slicing for large images
         with image_layer.dask_optimized_slicing():
-            worker = grpc_process_image(image_data, settings, iter_spec)
+            worker = grpc_process_image(
+                image_data, settings, iter_spec, abort_event=self._abort_event
+            )
 
         self._cancel_callback = lambda: self._cancel(worker)
         self._cancel_button.clicked.connect(self._cancel_callback)
@@ -330,3 +335,36 @@ class ImageProcessingWidget(_WidgetBase):
         worker.errored.connect(self._error)
 
         worker.start()
+
+
+def _prepare_for_viewer(data: np.ndarray) -> np.ndarray:
+    """Prepare 5D TZCYX data for napari viewer.
+
+    Checks if data is RGB (uint8 with 3 or 4 channels) and moves C to last dim.
+    Otherwise squeezes singleton dims.
+
+    Args:
+        data: 5D array in TZCYX order
+
+    Returns:
+        Array suitable for napari viewer (with RGB handling if applicable)
+    """
+    # data is TZCYX (5D)
+    is_rgb = (
+        data.dtype == np.uint8
+        and data.shape[2] in (3, 4)  # C dimension at index 2 in TZCYX
+    )
+
+    if is_rgb:
+        # Move C from index 2 to last: TZCYX -> TZYXC
+        data = np.moveaxis(data, 2, -1)
+        # Squeeze T and Z if singleton
+        if data.shape[0] == 1:
+            data = data[0]  # Remove T: ZYXC
+        if data.ndim > 3 and data.shape[0] == 1:  # Check Z
+            data = data[0]  # Remove Z: YXC
+    else:
+        # Non-RGB: squeeze singleton dims
+        data = np.squeeze(data)
+
+    return data
