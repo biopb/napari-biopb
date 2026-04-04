@@ -1,3 +1,4 @@
+import io
 import logging
 import re
 import threading
@@ -7,6 +8,7 @@ from typing import Generator, Optional, Tuple
 import biopb.image as proto
 import grpc
 import numpy as np
+import pandas as pd
 from biopb.image.utils import deserialize_to_numpy, serialize_from_numpy
 from google.protobuf import empty_pb2, struct_pb2
 from grpc_health.v1 import health_pb2, health_pb2_grpc
@@ -109,6 +111,21 @@ def dict_to_struct(d: dict) -> struct_pb2.Struct:
 def struct_to_dict(s: struct_pb2.Struct) -> dict:
     """Convert protobuf Struct to Python dict."""
     return dict(s)
+
+
+def _parse_annotation_tsv(annotation: str) -> pd.DataFrame:
+    """Parse TSV annotation string to DataFrame.
+
+    Args:
+        annotation: TSV-formatted string with header row
+
+    Returns:
+        DataFrame with annotation data, empty DataFrame if no data
+    """
+    if not annotation:
+        return pd.DataFrame()
+
+    return pd.read_csv(io.StringIO(annotation), delimiter="\t")
 
 
 def _encode_image(
@@ -392,7 +409,7 @@ def grpc_process_image(
     settings: dict,
     iter_spec: IterationSpec,
     abort_event: Optional[threading.Event] = None,
-) -> Generator[Tuple[np.ndarray, dict], None, None]:
+) -> Generator[Tuple[Optional[np.ndarray], dict, dict], None, None]:
     """Run image processing via gRPC with dimensional iteration.
 
     Args:
@@ -402,9 +419,10 @@ def grpc_process_image(
         abort_event: Optional threading.Event to signal cancellation
 
     Yields:
-        Tuple of (result_chunk, position) for each iteration
-        - result_chunk: Processed image array (5D TZCYX)
+        Tuple of (result_chunk, position, annotation) for each iteration
+        - result_chunk: Processed image array (5D TZCYX) or None if empty
         - position: Dict mapping numeric dim indices to index values
+        - annotation: Dict of column->values for table display
 
     Raises:
         ValueError: If operation changes iterated dimensions from singleton
@@ -458,26 +476,40 @@ def grpc_process_image(
 
             response = future.result(timeout=timeout)
 
-            # Always decode with full 5D axis order
-            output = deserialize_to_numpy(
-                response.image_data.pixels, np_index_order="TZCYX"
+            # Parse annotation from response
+            annotation_data = _parse_annotation_tsv(response.annotation)
+
+            # Check if response has image data
+            has_image = (
+                response.image_data is not None
+                and response.image_data.pixels is not None
+                and response.image_data.pixels.ByteSize() > 0
             )
-            # Ensure native byte order
-            output = output.astype(output.dtype.type)
 
-            # Validate: all iter dims must be singleton in output
-            for axis_name in iter_spec.iter_dims:
-                full_idx = FULL_ORDER.index(axis_name)
-                if output.shape[full_idx] != 1:
-                    raise ValueError(
-                        f"Operation changed iterated dimension '{axis_name}' "
-                        f"from 1 to {output.shape[full_idx]}. "
-                        f"Cannot tile results when operation modifies iterated dimensions."
-                    )
+            if has_image:
+                # Always decode with full 5D axis order
+                output = deserialize_to_numpy(
+                    response.image_data.pixels, np_index_order="TZCYX"
+                )
+                # Ensure native byte order
+                output = output.astype(output.dtype.type)
 
-            logger.debug("Processed chunk, output shape: %s", output.shape)
+                # Validate: all iter dims must be singleton in output
+                for axis_name in iter_spec.iter_dims:
+                    full_idx = FULL_ORDER.index(axis_name)
+                    if output.shape[full_idx] != 1:
+                        raise ValueError(
+                            f"Operation changed iterated dimension '{axis_name}' "
+                            f"from 1 to {output.shape[full_idx]}. "
+                            f"Cannot tile results when operation modifies iterated dimensions."
+                        )
 
-            yield output, position
+                logger.debug("Processed chunk, output shape: %s", output.shape)
+            else:
+                output = None
+                logger.debug("Response has no image data, only annotation")
+
+            yield output, position, annotation_data
 
 
 def _extract_kwargs(settings: dict) -> dict:

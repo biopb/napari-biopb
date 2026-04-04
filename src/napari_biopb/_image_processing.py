@@ -2,6 +2,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 from magicgui.widgets import (
     CheckBox,
     Container,
@@ -291,8 +292,24 @@ class ImageProcessingWidget(_WidgetBase):
         self._prepare()
         self._progress_bar.max = n_iterations
 
+        # Initialize annotation collection
+        self._current_annotations = []
+
         def _update(value):
-            result_chunk, position = value
+            result_chunk, position, annotation_data = value
+
+            # Collect annotation data if present, annotated with position
+            if not annotation_data.empty:
+                # Add position columns to annotation
+                position_annotation = _add_position_to_annotation(
+                    annotation_data, position, iter_spec.axis_order
+                )
+                self._current_annotations.append(position_annotation)
+
+            # Skip image handling if no image data in response
+            if result_chunk is None:
+                self._progress_bar.increment()
+                return
 
             result_builder.add_result(position, result_chunk)
             self._progress_bar.increment()
@@ -319,6 +336,16 @@ class ImageProcessingWidget(_WidgetBase):
             """Callback on successful completion - cleanup and save config."""
             if self.out_layer is not None:
                 self.out_layer.reset_contrast_limits()
+
+            # Handle annotations: merge and display table
+            if self._current_annotations:
+                merged_annotation = _merge_annotations(self._current_annotations)
+                if not merged_annotation.empty:
+                    # Use output layer if exists, else input layer
+                    target_layer = self.out_layer if self.out_layer else image_layer
+                    target_layer.metadata["annotation"] = merged_annotation
+                    _show_annotation_table(target_layer, self._viewer, merged_annotation)
+
             self._cleanup()
             self._save_config()
 
@@ -368,3 +395,72 @@ def _prepare_for_viewer(data: np.ndarray) -> np.ndarray:
         data = np.squeeze(data)
 
     return data
+
+
+def _add_position_to_annotation(
+    annotation: pd.DataFrame, position: dict, axis_order: str
+) -> pd.DataFrame:
+    """Add position columns to annotation DataFrame.
+
+    Args:
+        annotation: DataFrame of annotation data
+        position: Dict mapping numeric dim indices to index values
+        axis_order: Axis order string (e.g., "TZYXC", "TZCYX")
+
+    Returns:
+        DataFrame with added position columns (T, Z if applicable)
+    """
+    if annotation.empty:
+        return annotation
+
+    result = annotation.copy()
+    # Add position columns based on axis_order
+    for dim_idx, dim_value in position.items():
+        dim_name = axis_order[dim_idx]
+        if dim_name in ("T", "Z"):
+            result[dim_name] = dim_value
+
+    return result
+
+
+def _merge_annotations(annotations: list) -> pd.DataFrame:
+    """Merge multiple annotation DataFrames into one.
+
+    Args:
+        annotations: List of DataFrames from multiple chunks
+
+    Returns:
+        Concatenated DataFrame with all rows
+    """
+    if not annotations:
+        return pd.DataFrame()
+
+    return pd.concat(annotations, ignore_index=True)
+
+
+def _show_annotation_table(
+    layer: "napari.layers.Layer", viewer: "napari.Viewer", annotation: pd.DataFrame
+):
+    """Display annotation as a table widget in napari viewer.
+
+    Args:
+        layer: Layer to associate with the table
+        viewer: napari viewer instance
+        annotation: DataFrame of annotation data
+    """
+    try:
+        from napari_skimage_regionprops import TableWidget
+
+        table_widget = TableWidget(layer, viewer)
+        # Convert DataFrame to dict for TableWidget
+        table_widget.set_content(annotation.to_dict("list"))
+        viewer.window.add_dock_widget(
+            table_widget,
+            area="right",
+            name="Annotation: " + layer.name,
+        )
+    except ImportError:
+        logger.warning(
+            "napari-skimage-regionprops not installed, "
+            "annotation stored in layer.metadata but table not displayed"
+        )

@@ -26,6 +26,7 @@ classifiers = [
 requires-python = ">=3.9"
 dependencies = [
     "numpy",
+    "pandas",
     "magicgui",
     "qtpy",
     "scikit-image",
@@ -46,6 +47,9 @@ testing = [
     "pytest-env",  # https://github.com/qwertyquerty/pytest-env
     "napari",
     "pyqt5",
+]
+tables = [
+    "napari-skimage-regionprops",  # For annotation table display
 ]
 
 [project.entry-points."napari.manifest"]

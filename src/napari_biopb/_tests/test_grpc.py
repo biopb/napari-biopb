@@ -10,6 +10,7 @@ from napari_biopb._grpc import (
     _get_grpc_channel,
     _get_label_filter,
     _object_detection_build_request,
+    _parse_annotation_tsv,
     _parse_server_url,
     check_server_health,
 )
@@ -443,3 +444,46 @@ class TestGrpcProcessImage:
         """Wrong dimensions raises ValueError."""
         # Documenting expected behavior - ValueError for wrong dimensions
         pass
+
+
+class TestParseAnnotationTsv:
+    """Tests for _parse_annotation_tsv function."""
+
+    def test_empty_annotation(self):
+        """Empty annotation returns empty DataFrame."""
+        result = _parse_annotation_tsv("")
+        assert result.empty
+
+    def test_none_annotation(self):
+        """None annotation returns empty DataFrame."""
+        result = _parse_annotation_tsv(None)
+        assert result.empty
+
+    def test_simple_tsv(self):
+        """Simple TSV with header parses correctly."""
+        tsv = "col1\tcol2\nval1\tval2\nval3\tval4"
+        result = _parse_annotation_tsv(tsv)
+        assert result["col1"].tolist() == ["val1", "val3"]
+        assert result["col2"].tolist() == ["val2", "val4"]
+
+    def test_single_row(self):
+        """TSV with single data row parses correctly."""
+        tsv = "name\tvalue\nitem1\t100"
+        result = _parse_annotation_tsv(tsv)
+        assert result["name"].tolist() == ["item1"]
+        assert result["value"].tolist() == [100]  # pandas auto-detects int
+
+    def test_numeric_values(self):
+        """Numeric values are parsed as integers."""
+        tsv = "id\tcount\n1\t42\n2\t100"
+        result = _parse_annotation_tsv(tsv)
+        assert result["id"].tolist() == [1, 2]
+        assert result["count"].tolist() == [42, 100]
+
+    def test_multiple_columns(self):
+        """TSV with multiple columns parses correctly."""
+        tsv = "a\tb\tc\n1\t2\t3\n4\t5\t6"
+        result = _parse_annotation_tsv(tsv)
+        assert result["a"].tolist() == [1, 4]
+        assert result["b"].tolist() == [2, 5]
+        assert result["c"].tolist() == [3, 6]
