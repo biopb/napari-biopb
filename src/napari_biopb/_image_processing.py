@@ -134,13 +134,25 @@ class ImageProcessingWidget(_WidgetBase):
                 self._op_schemas = dict(result.op_schemas)
 
                 # Filter ops by label if specified
+                # Head match requires min 3 chars; shorter filters use exact match only
                 op_list = list(result.names)
                 if label_filter:
-                    filtered_ops = [
-                        op
-                        for op in op_list
-                        if label_filter in self._op_schemas[op].labels
-                    ]
+                    if len(label_filter) >= 3:
+                        filtered_ops = [
+                            op
+                            for op in op_list
+                            if any(
+                                label.startswith(label_filter)
+                                for label in self._op_schemas[op].labels
+                            )
+                        ]
+                    else:
+                        # Short filter: exact match only (e.g., "op" matches label "op")
+                        filtered_ops = [
+                            op
+                            for op in op_list
+                            if label_filter in self._op_schemas[op].labels
+                        ]
                     op_list = filtered_ops
 
                 self._op_selector.choices = op_list
