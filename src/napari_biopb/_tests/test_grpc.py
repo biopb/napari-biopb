@@ -487,3 +487,40 @@ class TestParseAnnotationTsv:
         assert result["a"].tolist() == [1, 4]
         assert result["b"].tolist() == [2, 5]
         assert result["c"].tolist() == [3, 6]
+
+    def test_header_duplicated_as_data(self):
+        """Header row appearing as data row is filtered out."""
+        tsv = "col1\tcol2\ncol1\tcol2\nval1\tval2"
+        result = _parse_annotation_tsv(tsv)
+        assert len(result) == 1
+        assert result["col1"].tolist() == ["val1"]
+        assert result["col2"].tolist() == ["val2"]
+
+    def test_multiple_header_duplicates(self):
+        """Multiple header rows appearing as data are all filtered out."""
+        tsv = "col1\tcol2\ncol1\tcol2\ncol1\tcol2\nval1\tval2\nval3\tval4"
+        result = _parse_annotation_tsv(tsv)
+        assert len(result) == 2
+        assert result["col1"].tolist() == ["val1", "val3"]
+        assert result["col2"].tolist() == ["val2", "val4"]
+
+    def test_comment_line_skipped(self):
+        """Comment lines starting with # are skipped before parsing."""
+        tsv = "# Directionality analysis\nangle\tcount\n-90.0\t0.0\n-88.0\t1.0"
+        result = _parse_annotation_tsv(tsv)
+        assert list(result.columns) == ["angle", "count"]
+        assert len(result) == 2
+        assert result["angle"].tolist() == [-90.0, -88.0]
+
+    def test_multiple_comment_lines(self):
+        """Multiple comment lines are all skipped."""
+        tsv = "# Comment 1\n# Comment 2\na\tb\n1\t2\n3\t4"
+        result = _parse_annotation_tsv(tsv)
+        assert list(result.columns) == ["a", "b"]
+        assert len(result) == 2
+
+    def test_only_comment_lines(self):
+        """TSV with only comment lines returns empty DataFrame."""
+        tsv = "# Only comments\n# No data"
+        result = _parse_annotation_tsv(tsv)
+        assert result.empty

@@ -67,7 +67,7 @@ class _WidgetBase(Container):
         worker.quit()
         self._cancel_button.enabled = False
         # Wait for worker to finish with timeout to prevent indefinite blocking
-        worker.await_workers(timeout=5.0)
+        worker.await_workers(5000)  # 5 seconds in milliseconds
         self._cleanup()
 
     def _prepare(self):

@@ -327,17 +327,13 @@ class ImageProcessingWidget(_WidgetBase):
             self._progress_bar.increment()
 
             if result_builder.buffer is not None:
-                # Prepare data for viewer (handle RGB, squeeze singletons)
-                output_data = _prepare_for_viewer(result_builder.buffer)
+                # Use raw 5D buffer for preview during streaming
+                output_data = result_builder.buffer
                 if self.out_layer is None:
                     name = image_layer.name + "_processed"
                     if name in self._viewer.layers:
-                        self._viewer.layers[name].data = output_data
-                    else:
-                        self._viewer.add_image(
-                            output_data,
-                            name=name,
-                        )
+                        self._viewer.layers.remove(name)
+                    self._viewer.add_image(output_data, name=name)
                     self.out_layer = self._viewer.layers[name]
                     self.out_layer.reset_contrast_limits()
                 else:
@@ -346,7 +342,18 @@ class ImageProcessingWidget(_WidgetBase):
 
         def _on_success():
             """Callback on successful completion - cleanup and save config."""
-            if self.out_layer is not None:
+            if result_builder.buffer is not None:
+                # Transform 5D buffer to final shape and recreate layer
+                final_data, is_rgb = _prepare_for_viewer(result_builder.buffer)
+                name = image_layer.name + "_processed"
+
+                # Remove existing layer if present
+                if name in self._viewer.layers:
+                    self._viewer.layers.remove(name)
+
+                # Add new layer with correct RGB setting
+                self._viewer.add_image(final_data, name=name, rgb=is_rgb)
+                self.out_layer = self._viewer.layers[name]
                 self.out_layer.reset_contrast_limits()
 
             # Handle annotations: merge and display table
@@ -376,7 +383,7 @@ class ImageProcessingWidget(_WidgetBase):
         worker.start()
 
 
-def _prepare_for_viewer(data: np.ndarray) -> np.ndarray:
+def _prepare_for_viewer(data: np.ndarray) -> tuple[np.ndarray, bool]:
     """Prepare 5D TZCYX data for napari viewer.
 
     Checks if data is RGB (uint8 with 3 or 4 channels) and moves C to last dim.
@@ -386,7 +393,7 @@ def _prepare_for_viewer(data: np.ndarray) -> np.ndarray:
         data: 5D array in TZCYX order
 
     Returns:
-        Array suitable for napari viewer (with RGB handling if applicable)
+        Tuple of (array suitable for napari viewer, is_rgb flag)
     """
     # data is TZCYX (5D)
     is_rgb = (
@@ -397,16 +404,15 @@ def _prepare_for_viewer(data: np.ndarray) -> np.ndarray:
     if is_rgb:
         # Move C from index 2 to last: TZCYX -> TZYXC
         data = np.moveaxis(data, 2, -1)
-        # Squeeze T and Z if singleton
-        if data.shape[0] == 1:
-            data = data[0]  # Remove T: ZYXC
-        if data.ndim > 3 and data.shape[0] == 1:  # Check Z
-            data = data[0]  # Remove Z: YXC
+        # Selectively squeeze singleton dims (except last which is C)
+        squeeze_axes = tuple(i for i, s in enumerate(data.shape[:-1]) if s == 1)
+        if squeeze_axes:
+            data = np.squeeze(data, axis=squeeze_axes)
     else:
         # Non-RGB: squeeze singleton dims
         data = np.squeeze(data)
 
-    return data
+    return data, is_rgb
 
 
 def _add_position_to_annotation(

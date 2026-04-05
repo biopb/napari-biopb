@@ -121,11 +121,35 @@ def _parse_annotation_tsv(annotation: str) -> pd.DataFrame:
 
     Returns:
         DataFrame with annotation data, empty DataFrame if no data
+
+    Note:
+        Handles comment lines (starting with #) and duplicate header rows.
+        Comment lines are skipped before parsing.
+        All rows matching header columns are filtered out.
     """
     if not annotation:
         return pd.DataFrame()
 
-    return pd.read_csv(io.StringIO(annotation), delimiter="\t")
+    # Split into lines and filter out comment lines (starting with #)
+    lines = annotation.strip().split("\n")
+    data_lines = [line for line in lines if not line.strip().startswith("#")]
+
+    if not data_lines:
+        return pd.DataFrame()
+
+    # Join filtered lines and parse
+    cleaned_tsv = "\n".join(data_lines)
+    df = pd.read_csv(io.StringIO(cleaned_tsv), delimiter="\t")
+
+    # Filter out rows where values match header columns (duplicate header rows)
+    if len(df) > 0:
+        header_values = df.columns.astype(str).tolist()
+        mask = df.apply(
+            lambda row: row.astype(str).tolist() == header_values, axis=1
+        )
+        df = df[~mask].reset_index(drop=True)
+
+    return df
 
 
 def _encode_image(
