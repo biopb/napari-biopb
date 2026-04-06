@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from magicgui.widgets import ComboBox, Container, ProgressBar, create_widget
 from napari.qt.threading import thread_worker
+from qtpy.QtCore import QTimer
 
 from ._config import load_config, save_config
 
@@ -39,6 +40,7 @@ class _WidgetBase(Container):
 
     def _cleanup(self):
         """Reset widget state after processing completes."""
+        self._stop_all_progress()
         self._progress_bar.visible = False
         self._run_button.visible = True
         self._run_button.enabled = True
@@ -63,6 +65,7 @@ class _WidgetBase(Container):
         Args:
             worker: The thread worker to cancel
         """
+        self._stop_all_progress()
         self._abort_event.set()
         worker.quit()
         self._cancel_button.enabled = False
@@ -73,6 +76,8 @@ class _WidgetBase(Container):
     def _prepare(self):
         """Prepare widget state before processing starts."""
         self._abort_event.clear()
+        self._calls_completed = 0
+        self._fake_subprogress = 0.0
 
         self._progress_bar.visible = True
         self._progress_bar.value = 0
@@ -125,6 +130,40 @@ class _WidgetBase(Container):
             self._is3d,
             self._server,
         ]
+
+        # Timer for fake progress during long gRPC calls
+        self._progress_timer = QTimer()
+        self._progress_timer.timeout.connect(self._tick_fake_progress)
+        self._calls_completed = 0  # Real progress count
+        self._fake_subprogress = (
+            0.0  # Within-current-call sub-progress (0-0.9)
+        )
+
+    def _tick_fake_progress(self):
+        """Increment sub-progress within current call."""
+        # Cap sub-progress at 0.9 (leave room for completion)
+        self._fake_subprogress = min(self._fake_subprogress + 0.1, 0.9)
+        self._progress_bar.value = int(
+            self._calls_completed + self._fake_subprogress
+        )
+
+    def _on_call_starting(self):
+        """Mark start of a new gRPC call - start fake progress timer."""
+        self._fake_subprogress = 0.0
+        self._progress_timer.start(500)
+
+    def _on_call_completed(self):
+        """Mark completion of a gRPC call - stop timer, update real progress."""
+        self._progress_timer.stop()
+        self._calls_completed += 1
+        self._fake_subprogress = 0.0
+        self._progress_bar.value = self._calls_completed
+
+    def _stop_all_progress(self):
+        """Stop timer on cancel/finish."""
+        self._progress_timer.stop()
+        self._calls_completed = 0
+        self._fake_subprogress = 0.0
 
     def _save_config(self):
         """Save current widget settings to config file."""

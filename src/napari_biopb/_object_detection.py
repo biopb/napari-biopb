@@ -154,7 +154,7 @@ class ObjectDetectionWidget(_WidgetBase):
         save_config(self._config)
 
     def run(self):
-        from ._grpc import grpc_object_detection
+        from ._grpc import CALL_START, grpc_object_detection
 
         self.n_results = 0
 
@@ -162,9 +162,13 @@ class ObjectDetectionWidget(_WidgetBase):
         image_layer = settings["Image"]
 
         def _update(value):
-            if value is None:  # patch prediction
-                self._progress_bar.increment()
-            else:  # full image prediction
+            if value == CALL_START:
+                # gRPC call starting - begin fake progress
+                self._on_call_starting()
+            elif value is None:  # patch prediction completed
+                self._on_call_completed()
+            else:  # full image prediction result (label array)
+                self._on_call_completed()
                 if self.out_layer is None:
                     name = self._image_layer_combo.value.name + "_label"
                     _output = np.zeros(image_data.shape[:-1], dtype=int)
@@ -194,7 +198,10 @@ class ObjectDetectionWidget(_WidgetBase):
             self._prepare()
 
             worker = grpc_object_detection(
-                image_data, settings, grid_positions, abort_event=self._abort_event
+                image_data,
+                settings,
+                grid_positions,
+                abort_event=self._abort_event,
             )
 
             self._cancel_callback = lambda: self._cancel(worker)

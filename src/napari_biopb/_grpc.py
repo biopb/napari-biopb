@@ -22,6 +22,9 @@ from ._typing import napari_data
 
 logger = logging.getLogger(__name__)
 
+# Sentinel value for signaling gRPC call start (for progress bar)
+CALL_START = "call_start"
+
 # Regex for parsing server URL with optional scheme prefix and path/label filter
 _URL_PATTERN = re.compile(
     r"^(?:(https?)://)?([^/]+)(?:/([^/]+))?$"  # Optional http/https scheme, host:port, optional path
@@ -398,6 +401,10 @@ def grpc_object_detection(
                 patch = np.array(image.__getitem__(grid))
 
                 request = _object_detection_build_request(patch, settings)
+
+                # Signal call start for progress bar
+                yield CALL_START
+
                 future = stub.RunDetection.future(request)
 
                 # Poll for abort while waiting for response
@@ -487,6 +494,9 @@ def grpc_process_image(
                 op_name=op_name,
                 kwargs=dict_to_struct(kwargs),
             )
+
+            # Signal call start for progress bar
+            yield CALL_START
 
             future = stub.Run.future(request)
 

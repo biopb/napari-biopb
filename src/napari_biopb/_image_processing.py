@@ -266,7 +266,7 @@ class ImageProcessingWidget(_WidgetBase):
         return widget
 
     def run(self):
-        from ._grpc import grpc_process_image
+        from ._grpc import CALL_START, grpc_process_image
 
         settings = self._snapshot()
         image_layer = settings["Image"]
@@ -297,7 +297,12 @@ class ImageProcessingWidget(_WidgetBase):
             1
             if not iter_spec.iter_dims
             else int(
-                np.prod([image_data.shape[axis_order.index(ax)] for ax in iter_spec.iter_dims])
+                np.prod(
+                    [
+                        image_data.shape[axis_order.index(ax)]
+                        for ax in iter_spec.iter_dims
+                    ]
+                )
             )
         )
 
@@ -308,7 +313,15 @@ class ImageProcessingWidget(_WidgetBase):
         self._current_annotations = []
 
         def _update(value):
+            if value == CALL_START:
+                # gRPC call starting - begin fake progress
+                self._on_call_starting()
+                return
+
             result_chunk, position, annotation_data = value
+
+            # Mark call completion
+            self._on_call_completed()
 
             # Collect annotation data if present, annotated with position
             if not annotation_data.empty:
@@ -320,11 +333,9 @@ class ImageProcessingWidget(_WidgetBase):
 
             # Skip image handling if no image data in response
             if result_chunk is None:
-                self._progress_bar.increment()
                 return
 
             result_builder.add_result(position, result_chunk)
-            self._progress_bar.increment()
 
             if result_builder.buffer is not None:
                 # Use raw 5D buffer for preview during streaming
@@ -358,12 +369,18 @@ class ImageProcessingWidget(_WidgetBase):
 
             # Handle annotations: merge and display table
             if self._current_annotations:
-                merged_annotation = _merge_annotations(self._current_annotations)
+                merged_annotation = _merge_annotations(
+                    self._current_annotations
+                )
                 if not merged_annotation.empty:
                     # Use output layer if exists, else input layer
-                    target_layer = self.out_layer if self.out_layer else image_layer
+                    target_layer = (
+                        self.out_layer if self.out_layer else image_layer
+                    )
                     target_layer.metadata["annotation"] = merged_annotation
-                    _show_annotation_table(target_layer, self._viewer, merged_annotation)
+                    _show_annotation_table(
+                        target_layer, self._viewer, merged_annotation
+                    )
 
             self._cleanup()
             self._save_config()
@@ -396,16 +413,18 @@ def _prepare_for_viewer(data: np.ndarray) -> tuple[np.ndarray, bool]:
         Tuple of (array suitable for napari viewer, is_rgb flag)
     """
     # data is TZCYX (5D)
-    is_rgb = (
-        data.dtype == np.uint8
-        and data.shape[2] in (3, 4)  # C dimension at index 2 in TZCYX
-    )
+    is_rgb = data.dtype == np.uint8 and data.shape[2] in (
+        3,
+        4,
+    )  # C dimension at index 2 in TZCYX
 
     if is_rgb:
         # Move C from index 2 to last: TZCYX -> TZYXC
         data = np.moveaxis(data, 2, -1)
         # Selectively squeeze singleton dims (except last which is C)
-        squeeze_axes = tuple(i for i, s in enumerate(data.shape[:-1]) if s == 1)
+        squeeze_axes = tuple(
+            i for i, s in enumerate(data.shape[:-1]) if s == 1
+        )
         if squeeze_axes:
             data = np.squeeze(data, axis=squeeze_axes)
     else:
@@ -457,7 +476,9 @@ def _merge_annotations(annotations: list) -> pd.DataFrame:
 
 
 def _show_annotation_table(
-    layer: "napari.layers.Layer", viewer: "napari.Viewer", annotation: pd.DataFrame
+    layer: "napari.layers.Layer",
+    viewer: "napari.Viewer",
+    annotation: pd.DataFrame,
 ):
     """Display annotation as a table widget in napari viewer.
 
