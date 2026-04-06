@@ -388,7 +388,11 @@ class ImageProcessingWidget(_WidgetBase):
         # Use dask_optimized_slicing for large images
         with image_layer.dask_optimized_slicing():
             worker = grpc_process_image(
-                image_data, settings, iter_spec, abort_event=self._abort_event
+                image_data,
+                settings,
+                iter_spec,
+                abort_event=self._abort_event,
+                future_container=self._active_future_container,
             )
 
         self._cancel_callback = lambda: self._cancel(worker)

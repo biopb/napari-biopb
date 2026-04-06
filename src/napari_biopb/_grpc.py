@@ -352,6 +352,7 @@ def grpc_object_detection(
     settings: dict,
     grid_positions: list,
     abort_event: Optional[threading.Event] = None,
+    future_container: Optional[dict] = None,
 ) -> Generator[np.ndarray, None, None]:
     """Run object detection on image data via gRPC.
 
@@ -360,6 +361,7 @@ def grpc_object_detection(
         settings: Widget settings dict
         grid_positions: List of slice tuples for patch positions
         abort_event: Optional threading.Event to signal cancellation
+        future_container: Optional dict to store active gRPC future for direct cancellation
 
     Yields:
         None for progress updates, then label array for each image
@@ -407,15 +409,29 @@ def grpc_object_detection(
 
                 future = stub.RunDetection.future(request)
 
+                # Store future in container for direct cancellation from UI thread
+                if future_container is not None:
+                    future_container["active"] = future
+
                 # Poll for abort while waiting for response
                 while not future.done():
                     if abort_event is not None and abort_event.is_set():
                         future.cancel()
+                        if future_container is not None:
+                            future_container["active"] = None
                         logger.info("gRPC RunDetection call cancelled")
                         return
                     time.sleep(0.05)
 
-                patch_response = future.result(timeout=timeout)
+                # Clear future reference after call completes
+                if future_container is not None:
+                    future_container["active"] = None
+
+                try:
+                    patch_response = future.result(timeout=timeout)
+                except grpc.FutureCancelledError:
+                    logger.info("gRPC RunDetection call was cancelled")
+                    return
                 patch_response = _adjust_response_offset(patch_response, grid)
 
                 logger.debug(
@@ -440,6 +456,7 @@ def grpc_process_image(
     settings: dict,
     iter_spec: IterationSpec,
     abort_event: Optional[threading.Event] = None,
+    future_container: Optional[dict] = None,
 ) -> Generator[Tuple[Optional[np.ndarray], dict, dict], None, None]:
     """Run image processing via gRPC with dimensional iteration.
 
@@ -448,6 +465,7 @@ def grpc_process_image(
         settings: Widget settings dict (includes 'Op' and kwargs)
         iter_spec: IterationSpec with iter_dims (set of axis names) and axis_order
         abort_event: Optional threading.Event to signal cancellation
+        future_container: Optional dict to store active gRPC future for direct cancellation
 
     Yields:
         Tuple of (result_chunk, position, annotation) for each iteration
@@ -500,15 +518,29 @@ def grpc_process_image(
 
             future = stub.Run.future(request)
 
+            # Store future in container for direct cancellation from UI thread
+            if future_container is not None:
+                future_container["active"] = future
+
             # Poll for abort while waiting for response
             while not future.done():
                 if abort_event is not None and abort_event.is_set():
                     future.cancel()
+                    if future_container is not None:
+                        future_container["active"] = None
                     logger.info("gRPC Run call cancelled")
                     return
                 time.sleep(0.05)
 
-            response = future.result(timeout=timeout)
+            # Clear future reference after call completes
+            if future_container is not None:
+                future_container["active"] = None
+
+            try:
+                response = future.result(timeout=timeout)
+            except grpc.FutureCancelledError:
+                logger.info("gRPC Run call was cancelled")
+                return
 
             # Parse annotation from response
             annotation_data = _parse_annotation_tsv(response.annotation)

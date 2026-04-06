@@ -202,6 +202,7 @@ class ObjectDetectionWidget(_WidgetBase):
                 settings,
                 grid_positions,
                 abort_event=self._abort_event,
+                future_container=self._active_future_container,
             )
 
             self._cancel_callback = lambda: self._cancel(worker)

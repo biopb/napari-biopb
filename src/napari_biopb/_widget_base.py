@@ -42,6 +42,9 @@ class _WidgetBase(Container):
         """Reset widget state after processing completes."""
         self._stop_all_progress()
         self._progress_bar.visible = False
+        self._progress_bar.label = (
+            "Running..."  # Reset label from "Canceling..."
+        )
         self._run_button.visible = True
         self._run_button.enabled = True
         self._cancel_button.visible = False
@@ -60,22 +63,32 @@ class _WidgetBase(Container):
         logger.error("Processing failed: %s", exc, exc_info=True)
 
     def _cancel(self, worker):
-        """Cancel the running worker.
+        """Cancel the running worker - non-blocking.
 
         Args:
             worker: The thread worker to cancel
         """
         self._stop_all_progress()
         self._abort_event.set()
+
+        # Directly cancel the active gRPC future (if any) for immediate abort
+        active_future = self._active_future_container.get("active")
+        if active_future is not None:
+            try:
+                active_future.cancel()
+            except Exception:
+                pass  # Future may already be done
+            self._active_future_container["active"] = None
+
         worker.quit()
         self._cancel_button.enabled = False
-        # Wait for worker to finish with timeout to prevent indefinite blocking
-        worker.await_workers(5000)  # 5 seconds in milliseconds
-        self._cleanup()
+        self._progress_bar.label = "Canceling..."
+        # Worker finishes asynchronously → finished signal → _cleanup()
 
     def _prepare(self):
         """Prepare widget state before processing starts."""
         self._abort_event.clear()
+        self._active_future_container = {}  # Reset container for new run
         self._calls_completed = 0
         self._fake_subprogress = 0.0
 
@@ -95,6 +108,9 @@ class _WidgetBase(Container):
         self._viewer = viewer
         self._cancel_callback = None
         self._abort_event = threading.Event()
+        self._active_future_container: dict = (
+            {}
+        )  # Container for active gRPC future
 
         # Load persisted config
         self._config = load_config()
