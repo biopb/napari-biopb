@@ -193,7 +193,7 @@ class ObjectDetectionWidget(_WidgetBase):
 
             grid_positions = self._get_grid_positions(image_data[0], settings)
 
-            self._progress_bar.max = len(image_data) * len(grid_positions)
+            self._progress_bar.max = len(image_data) * len(grid_positions) * 10
 
             self._prepare()
 

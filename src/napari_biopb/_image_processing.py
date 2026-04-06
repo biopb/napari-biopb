@@ -307,7 +307,7 @@ class ImageProcessingWidget(_WidgetBase):
         )
 
         self._prepare()
-        self._progress_bar.max = n_iterations
+        self._progress_bar.max = n_iterations * 10
 
         # Initialize annotation collection
         self._current_annotations = []

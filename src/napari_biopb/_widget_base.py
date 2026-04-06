@@ -90,7 +90,7 @@ class _WidgetBase(Container):
         self._abort_event.clear()
         self._active_future_container = {}  # Reset container for new run
         self._calls_completed = 0
-        self._fake_subprogress = 0.0
+        self._fake_subprogress = 0
 
         self._progress_bar.visible = True
         self._progress_bar.value = 0
@@ -148,38 +148,59 @@ class _WidgetBase(Container):
         ]
 
         # Timer for fake progress during long gRPC calls
-        self._progress_timer = QTimer()
+        # Parent to native widget for proper Qt lifecycle management
+        self._progress_timer = QTimer(self.native)
         self._progress_timer.timeout.connect(self._tick_fake_progress)
-        self._calls_completed = 0  # Real progress count
-        self._fake_subprogress = (
-            0.0  # Within-current-call sub-progress (0-0.9)
-        )
+        self._calls_completed = 0  # Real progress count (each call = 10 units)
+        self._fake_subprogress = 0  # Within-current-call sub-progress (0-9)
 
     def _tick_fake_progress(self):
-        """Increment sub-progress within current call."""
-        # Cap sub-progress at 0.9 (leave room for completion)
-        self._fake_subprogress = min(self._fake_subprogress + 0.1, 0.9)
-        self._progress_bar.value = int(
-            self._calls_completed + self._fake_subprogress
+        """Increment sub-progress within current call.
+
+        Uses scaled integer values (x10) because magicgui ProgressBar truncates
+        floats to integers. So instead of 0.1, 0.2... we use 1, 2... and scale
+        the max by 10 in the subclass.
+        """
+        # Cap sub-progress at 9 (leave room for completion at 10)
+        self._fake_subprogress = min(self._fake_subprogress + 1, 9)
+        # Calculate scaled progress value
+        progress_value = self._calls_completed * 10 + self._fake_subprogress
+        # Set the value
+        self._progress_bar.value = progress_value
+        logger.debug(
+            "Progress tick: subprogress=%d, value=%d",
+            self._fake_subprogress,
+            progress_value,
         )
 
     def _on_call_starting(self):
         """Mark start of a new gRPC call - start fake progress timer."""
-        self._fake_subprogress = 0.0
-        self._progress_timer.start(500)
+        logger.debug("Progress: call starting, starting progress timer")
+        self._fake_subprogress = 0
+        self._progress_timer.start(500)  # 500ms interval
 
     def _on_call_completed(self):
-        """Mark completion of a gRPC call - stop timer, update real progress."""
+        """Mark completion of a gRPC call - stop timer, update real progress.
+
+        Note: Progress values are scaled by 10 (see _tick_fake_progress).
+        """
+        logger.debug("Progress: call completed, stopping progress timer")
         self._progress_timer.stop()
         self._calls_completed += 1
-        self._fake_subprogress = 0.0
-        self._progress_bar.value = self._calls_completed
+        self._fake_subprogress = 0
+        # Set to next multiple of 10 (each call = 10 progress units)
+        self._progress_bar.value = self._calls_completed * 10
+        logger.debug(
+            "Progress: calls_completed=%d, value=%d",
+            self._calls_completed,
+            self._progress_bar.value,
+        )
 
     def _stop_all_progress(self):
-        """Stop timer on cancel/finish."""
+        """Stop progress timer on cancel/finish."""
         self._progress_timer.stop()
         self._calls_completed = 0
-        self._fake_subprogress = 0.0
+        self._fake_subprogress = 0
 
     def _save_config(self):
         """Save current widget settings to config file."""
