@@ -7,15 +7,7 @@
 [![codecov](https://codecov.io/gh/jiyuuchc/napari-biopb/branch/main/graph/badge.svg)](https://codecov.io/gh/jiyuuchc/napari-biopb)
 [![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-biopb)](https://napari-hub.org/plugins/napari-biopb)
 
-Performing single-cell segmentation by visiting [biopb](https://github.com/jiyuuchc/biopb) endpoints
-
-<!--
-Don't miss the full getting started guide to set up your new package:
-https://github.com/napari/napari-plugin-template#getting-started
-
-and review the napari docs for plugin developers:
-https://napari.org/stable/plugins/index.html
--->
+A [biopb](https://github.com/jiyuuchc/biopb) plugin for [napari](https://github.com/napari/napari).
 
 ## Installation
 
