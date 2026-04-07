@@ -100,6 +100,8 @@ class _WidgetBase(Container):
         self._active_future_container = {}  # Reset container for new run
         self._calls_completed = 0
         self._fake_subprogress = 0
+        self._pending_calls = 0  # Track calls submitted but not yet completed
+        self._total_calls = 0  # Total number of calls expected
 
         self._progress_bar.visible = True
         self._progress_bar.value = 0
@@ -160,56 +162,87 @@ class _WidgetBase(Container):
         # Parent to native widget for proper Qt lifecycle management
         self._progress_timer = QTimer(self.native)
         self._progress_timer.timeout.connect(self._tick_fake_progress)
-        self._calls_completed = 0  # Real progress count (each call = 10 units)
-        self._fake_subprogress = 0  # Within-current-call sub-progress (0-9)
+        self._calls_completed = 0  # Real progress count
+        self._fake_subprogress = 0  # Legacy: kept for compatibility
+        self._pending_calls = 0  # Track calls submitted but not yet completed
+        self._total_calls = 0  # Total number of calls expected
 
     def _tick_fake_progress(self):
-        """Increment sub-progress within current call.
+        """Fake progress between completions - bump current progress slightly.
 
-        Uses scaled integer values (x10) because magicgui ProgressBar truncates
-        floats to integers. So instead of 0.1, 0.2... we use 1, 2... and scale
-        the max by 10 in the subclass.
+        With concurrent calls, we show activity by inching toward the completion-based
+        target. Progress is capped at max-1 to leave room for final completion.
         """
-        # Cap sub-progress at 9 (leave room for completion at 10)
-        self._fake_subprogress = min(self._fake_subprogress + 1, 9)
-        # Calculate scaled progress value
-        progress_value = self._calls_completed * 10 + self._fake_subprogress
-        # Set the value
-        self._progress_bar.value = progress_value
-        logger.debug(
-            "Progress tick: subprogress=%d, value=%d",
-            self._fake_subprogress,
-            progress_value,
-        )
+        if self._pending_calls > 0 and self._total_calls > 0:
+            current = self._progress_bar.value
+            target = int(
+                self._calls_completed
+                / self._total_calls
+                * self._progress_bar.max
+            )
+            # Fake progress: inch toward target + small offset, capped at max-1
+            fake_target = min(target + 5, self._progress_bar.max - 1)
+            self._progress_bar.value = min(current + 1, fake_target)
+            logger.debug(
+                "Progress tick: current=%d, target=%d, fake_target=%d, value=%d",
+                current,
+                target,
+                fake_target,
+                self._progress_bar.value,
+            )
 
     def _on_call_starting(self):
-        """Mark start of a new gRPC call - start fake progress timer."""
-        logger.debug("Progress: call starting, starting progress timer")
-        self._fake_subprogress = 0
-        self._progress_timer.start(500)  # 500ms interval
+        """Mark start of a gRPC call - increment pending counter and start timer.
+
+        For concurrent calls, we track how many calls are pending (submitted but
+        not yet completed) and only start the timer once.
+        """
+        logger.debug(
+            "Progress: call starting, pending=%d", self._pending_calls
+        )
+        self._pending_calls += 1
+        self._total_calls = max(
+            self._total_calls, self._pending_calls + self._calls_completed
+        )
+        # Start timer if not already running and we have pending calls
+        if self._pending_calls > 0 and not self._progress_timer.isActive():
+            self._progress_timer.start(500)  # 500ms interval
 
     def _on_call_completed(self):
-        """Mark completion of a gRPC call - stop timer, update real progress.
+        """Mark completion of a gRPC call - decrement pending, update progress.
 
-        Note: Progress values are scaled by 10 (see _tick_fake_progress).
+        Progress is calculated based on completed/total ratio with guard to ensure
+        value <= max. Timer stops when no pending calls remain.
         """
-        logger.debug("Progress: call completed, stopping progress timer")
-        self._progress_timer.stop()
-        self._calls_completed += 1
-        self._fake_subprogress = 0
-        # Set to next multiple of 10 (each call = 10 progress units)
-        self._progress_bar.value = self._calls_completed * 10
         logger.debug(
-            "Progress: calls_completed=%d, value=%d",
+            "Progress: call completed, pending=%d, completed=%d, total=%d",
+            self._pending_calls,
             self._calls_completed,
-            self._progress_bar.value,
+            self._total_calls,
         )
+        self._pending_calls -= 1
+        self._calls_completed += 1
+        # Update progress bar directly with guard to ensure value <= max
+        if self._total_calls > 0:
+            progress = int(
+                self._calls_completed
+                / self._total_calls
+                * self._progress_bar.max
+            )
+            self._progress_bar.value = min(progress, self._progress_bar.max)
+        # Stop timer when no pending calls
+        if self._pending_calls <= 0:
+            self._progress_timer.stop()
+            # Set to max on completion (guard against wrong estimation)
+            self._progress_bar.value = self._progress_bar.max
 
     def _stop_all_progress(self):
         """Stop progress timer on cancel/finish."""
         self._progress_timer.stop()
         self._calls_completed = 0
         self._fake_subprogress = 0
+        self._pending_calls = 0
+        self._total_calls = 0
 
     def _save_config(self):
         """Save current widget settings to config file."""

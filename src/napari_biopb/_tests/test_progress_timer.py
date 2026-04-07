@@ -27,6 +27,11 @@ class TestProgressTimer:
         widget._progress_bar.max = 100
         widget._progress_bar.visible = True
 
+        # Set up pending/total calls so tick will work
+        widget._pending_calls = 1
+        widget._total_calls = 1
+        widget._calls_completed = 0
+
         # Track timer ticks
         tick_count = [0]
         original_tick = widget._tick_fake_progress
@@ -39,8 +44,6 @@ class TestProgressTimer:
         widget._progress_timer.timeout.connect(counting_tick)
 
         # Start timer
-        widget._fake_subprogress = 0
-        widget._calls_completed = 0
         widget._progress_timer.start(50)  # 50ms interval
 
         # Process events manually
@@ -54,52 +57,62 @@ class TestProgressTimer:
         widget._progress_timer.stop()
 
         assert tick_count[0] >= 3, f"Expected >= 3 ticks, got {tick_count[0]}"
-        assert widget._fake_subprogress > 0
+        assert widget._progress_bar.value > 0
 
     def test_on_call_starting_starts_timer(self, qtbot, make_napari_viewer):
-        """_on_call_starting() starts the timer."""
+        """_on_call_starting() increments pending calls and starts the timer."""
         from qtpy.QtWidgets import QApplication
         from napari_biopb._widget_base import _WidgetBase
 
         viewer = make_napari_viewer()
         widget = _WidgetBase(viewer)
+        widget._progress_bar.max = 100
 
         # Timer should not be running initially
         assert not widget._progress_timer.isActive()
+        assert widget._pending_calls == 0
 
         # Call _on_call_starting
         widget._on_call_starting()
 
+        # Pending calls should be incremented
+        assert widget._pending_calls == 1
+        assert widget._total_calls == 1
+
         # Timer should now be active
         assert widget._progress_timer.isActive()
 
-        # Process events and verify it ticks
+        # Process events and verify it ticks (progress bar value increases)
         app = QApplication.instance()
         for _ in range(15):
             app.processEvents()
             time.sleep(0.05)
 
-        assert widget._fake_subprogress > 0
+        assert widget._progress_bar.value > 0
         widget._progress_timer.stop()
 
     def test_on_call_completed_stops_timer(self, qtbot, make_napari_viewer):
-        """_on_call_completed() stops the timer."""
+        """_on_call_completed() decrements pending calls and stops timer when no pending."""
         from napari_biopb._widget_base import _WidgetBase
 
         viewer = make_napari_viewer()
         widget = _WidgetBase(viewer)
+        widget._progress_bar.max = 100
 
-        # Start timer
+        # Start one call
         widget._on_call_starting()
         assert widget._progress_timer.isActive()
+        assert widget._pending_calls == 1
 
         # Complete the call
         widget._on_call_completed()
 
-        # Timer should be stopped
+        # Timer should be stopped when pending_calls reaches 0
         assert not widget._progress_timer.isActive()
         assert widget._calls_completed == 1
-        assert widget._fake_subprogress == 0
+        assert widget._pending_calls == 0
+        # Progress bar should be at max when all calls complete
+        assert widget._progress_bar.value == widget._progress_bar.max
 
     def test_timer_parent_is_widget_native(self, qtbot, make_napari_viewer):
         """Timer is parented to the widget's native Qt widget."""
@@ -111,7 +124,7 @@ class TestProgressTimer:
         assert widget._progress_timer.parent() == widget.native
 
     def test_progress_uses_scaled_integers(self, qtbot, make_napari_viewer):
-        """Progress values are scaled integers (x10) for magicgui compatibility."""
+        """Progress increments proportionally based on completed/total ratio."""
         from qtpy.QtWidgets import QApplication
         from napari_biopb._widget_base import _WidgetBase
 
@@ -119,21 +132,31 @@ class TestProgressTimer:
         widget = _WidgetBase(viewer)
         widget._progress_bar.max = 100
 
-        # Simulate progress ticks
-        widget._fake_subprogress = 0
+        # Set up for 10 total calls, all pending
+        widget._pending_calls = 10
+        widget._total_calls = 10
         widget._calls_completed = 0
 
+        # Tick without completions: fake progress inches forward
         widget._tick_fake_progress()
         assert widget._progress_bar.value == 1
 
         widget._tick_fake_progress()
         assert widget._progress_bar.value == 2
 
-        # After 9 ticks, should cap at 9
-        for _ in range(10):
+        # After many ticks with no completions, fake progress caps at target+5
+        # Since target = calls_completed/total_calls * max = 0, cap at 5
+        for _ in range(100):
             widget._tick_fake_progress()
-        assert widget._fake_subprogress == 9
-        assert widget._progress_bar.value == 9
+        assert widget._progress_bar.value == 5  # capped at target+5 = 0+5
+
+        # Now simulate some completions - progress should advance
+        widget._calls_completed = 5
+        widget._pending_calls = 5
+        widget._tick_fake_progress()
+        # target = 5/10 * 100 = 50, fake_target = min(50+5, 99) = 55
+        # But we start from current=5, so after one tick: min(5+1, 55) = 6
+        assert widget._progress_bar.value == 6
 
     @pytest.mark.skip(
         reason="qtbot.waitSignal doesn't process QTimer events; works in real GUI"
