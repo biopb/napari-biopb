@@ -2,9 +2,17 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from magicgui.widgets import ComboBox, Container, ProgressBar, create_widget
+import grpc
+from magicgui.widgets import (
+    ComboBox,
+    Container,
+    Label,
+    ProgressBar,
+    create_widget,
+)
 from napari.qt.threading import thread_worker
-from qtpy.QtCore import QTimer
+from qtpy.QtCore import Qt, QTimer
+from qtpy.QtWidgets import QSizePolicy
 
 from ._config import load_config, save_config
 
@@ -12,6 +20,69 @@ if TYPE_CHECKING:
     import napari
 
 logger = logging.getLogger(__name__)
+
+
+def _format_error_message(exc: Exception) -> str:
+    """Format exception into a succinct error message for widget display.
+
+    For gRPC errors, extracts status code name and first line of details.
+    For other errors, returns the exception type and message (truncated).
+
+    Args:
+        exc: The exception to format
+
+    Returns:
+        Succinct error message string with HTML formatting for status part
+    """
+    if isinstance(exc, grpc.RpcError):
+        # gRPC errors have code() and details()
+        status_name = exc.code().name if hasattr(exc, "code") else "UNKNOWN"
+        details = exc.details() if hasattr(exc, "details") else str(exc)
+        # Take first line, strip actual/literal newlines, truncate to ~100 chars
+        first_line = details.split("\n")[0].replace("\\n", " ").strip()
+        if len(first_line) > 100:
+            first_line = first_line[:100] + "..."
+        return (
+            f'<span style="color: #d32f2f; font-weight: bold;">{status_name}</span>: '
+            f"{first_line}"
+        )
+    else:
+        # Non-gRPC error: show type and truncated message
+        exc_type = type(exc).__name__
+        msg = str(exc).split("\n")[0].replace("\\n", " ").strip()
+        if len(msg) > 100:
+            msg = msg[:100] + "..."
+        return (
+            f'<span style="color: #d32f2f; font-weight: bold;">{exc_type}</span>: '
+            f"{msg}"
+        )
+
+
+def _make_full_width(widget: Label) -> None:
+    """Configure a Label widget to span full width by hiding its label column.
+
+    When widgets are added to a Container with labels=True, each widget is wrapped
+    in a _LabeledWidget with a horizontal layout containing label + value. This
+    function hides the label portion so the value spans the full width.
+
+    Args:
+        widget: A Label widget that has been added to a Container
+    """
+    lw_ref = getattr(widget, "_labeled_widget_ref", None)
+    if lw_ref is None:
+        return
+    lw = lw_ref()
+    if lw is None:
+        return
+
+    # Hide and shrink the label widget
+    lw._label_widget.native.setFixedWidth(0)
+    lw._label_widget.native.hide()
+
+    # Set stretch factors: 0 for label, 1 for value
+    layout = lw.native.layout()
+    layout.setStretch(0, 0)
+    layout.setStretch(1, 1)
 
 
 class _PersistentComboBox(ComboBox):
@@ -58,9 +129,15 @@ class _WidgetBase(Container):
             self._cancel_callback = None
 
     def _error(self, exc: Exception):
-        """Log error (napari displays it via notification_manager)."""
+        """Display error message in widget, then reraise for napari notification."""
         self._cleanup()
+        # Show succinct error message with word wrap
+        self._error_label.value = _format_error_message(exc)
+        self._error_label.visible = True
+        self._error_label.native.adjustSize()
         logger.error("Processing failed: %s", exc, exc_info=True)
+        # Reraise so napari's notification_manager shows the error
+        raise exc
 
     def _cancel(self, worker):
         """Cancel the running worker - non-blocking.
@@ -103,6 +180,10 @@ class _WidgetBase(Container):
         self._pending_calls = 0  # Track calls submitted but not yet completed
         self._total_calls = 0  # Total number of calls expected
 
+        # Clear previous error
+        self._error_label.visible = False
+        self._error_label.value = ""
+
         self._progress_bar.visible = True
         self._progress_bar.value = 0
 
@@ -122,6 +203,9 @@ class _WidgetBase(Container):
         self._active_future_container: dict = (
             {}
         )  # Container for active gRPC future
+
+        # Make container expand to fill available width in dock widget
+        self.native.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         # Load persisted config
         self._config = load_config()
@@ -151,6 +235,15 @@ class _WidgetBase(Container):
 
         self._run_button = create_widget(label="Run", widget_type="Button")
         self._run_button.clicked.connect(self.run)
+
+        self._error_label = Label(value="", label="")
+        self._error_label.visible = False
+        # Enable rich text for colored status part
+        self._error_label.native.setTextFormat(Qt.TextFormat.RichText)
+        # Ignore sizeHint horizontally so widget doesn't expand to fit text
+        self._error_label.native.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
 
         self._elements = [
             self._image_layer_combo,

@@ -22,7 +22,7 @@ from ._chunking import (
     _get_iter_spec,
     _validate_data_shape,
 )
-from ._widget_base import _PersistentComboBox, _WidgetBase
+from ._widget_base import _PersistentComboBox, _WidgetBase, _make_full_width
 
 if TYPE_CHECKING:
     import napari
@@ -51,10 +51,10 @@ class ImageProcessingWidget(_WidgetBase):
         # Description display for the selected op (multiline with word wrap)
         self._op_description = Label(value="", label="")
         self._op_description.visible = False
-        # Configure for Qt6 multiline with proper height adjustment
+        # Configure for multiline with word wrap
         self._op_description.native.setWordWrap(True)
         self._op_description.native.setSizePolicy(
-            QSizePolicy.Preferred,
+            QSizePolicy.Expanding,
             QSizePolicy.Preferred,
         )
         self._op_description.native.setMaximumHeight(250)
@@ -63,7 +63,7 @@ class ImageProcessingWidget(_WidgetBase):
         self._kwargs_container = Container(label="Kwargs", visible=False)
 
         # Status label for ops connection status
-        self._ops_status = Label(value="Not connected", label="Ops Status")
+        self._ops_status = Label(value="Ops: Not connected", label="")
 
         # Store schemas for each op (populated from GetOpNames response)
         self._op_schemas = {}
@@ -89,8 +89,14 @@ class ImageProcessingWidget(_WidgetBase):
                 self._progress_bar,
                 self._cancel_button,
                 self._run_button,
+                self._error_label,
             ]
         )
+
+        # Configure labels to span full width (hide the label column)
+        _make_full_width(self._error_label)
+        _make_full_width(self._ops_status)
+        _make_full_width(self._op_description)
 
         # Fetch ops during initialization
         self._fetch_ops()
@@ -112,7 +118,7 @@ class ImageProcessingWidget(_WidgetBase):
         """Fetch available operations from server asynchronously."""
         from ._grpc import get_op_names, _get_label_filter
 
-        self._ops_status.value = "Fetching..."
+        self._ops_status.value = "Ops: Fetching..."
         self._op_selector.visible = False
         self._kwargs_container.visible = False
         settings = self._snapshot()
@@ -155,32 +161,32 @@ class ImageProcessingWidget(_WidgetBase):
                         ]
                     op_list = filtered_ops
 
+                op_list = sorted(op_list)
                 self._op_selector.choices = op_list
                 if op_list:
                     self._op_selector.value = op_list[0]
 
                 if len(op_list) == 1:
                     # Single op: hide selector, show op name in status
-                    self._ops_status.value = f"Connected: {op_list[0]}"
+                    self._ops_status.value = f"Ops: Connected ({op_list[0]})"
                     self._op_selector.visible = False
                 elif op_list:
                     # Multiple ops: show selector with count in status
-                    count_str = f" ({len(op_list)} ops"
+                    count_str = f"{len(op_list)} ops"
                     if label_filter:
                         count_str += f", filtered by '{label_filter}'"
-                    count_str += ")"
-                    self._ops_status.value = f"Connected{count_str}"
+                    self._ops_status.value = f"Ops: Connected ({count_str})"
                     self._op_selector.visible = True
                 else:
                     # No ops match the filter
                     if label_filter:
                         self._ops_status.value = (
-                            f"No ops with label '{label_filter}'"
+                            f"Ops: No ops with label '{label_filter}'"
                         )
                     else:
-                        self._ops_status.value = "No ops available"
+                        self._ops_status.value = "Ops: No ops available"
 
-        self._ops_status.value = "No op schema available"
+        self._ops_status.value = "Ops: No schema available"
         self._op_selector.choices = ["<no ops>"]
         self._op_schemas = {}
         self._op_selector.visible = False
@@ -248,9 +254,14 @@ class ImageProcessingWidget(_WidgetBase):
         if isinstance(value, bool):
             widget = CheckBox(value=value, label=key)
         elif isinstance(value, int):
-            widget = SpinBox(value=value, label=key, step=1, format="%d")
+            widget = SpinBox(value=value, label=key, step=1)
         elif isinstance(value, float):
-            widget = FloatSpinBox(value=value, label=key)
+            # Heuristic: check if float has fractional part
+            if value == int(value):
+                # No fractional part → treat as integer
+                widget = SpinBox(value=int(value), label=key, step=1)
+            else:
+                widget = FloatSpinBox(value=value, label=key)
         elif isinstance(value, str):
             widget = LineEdit(value=value, label=key)
         elif isinstance(value, list):

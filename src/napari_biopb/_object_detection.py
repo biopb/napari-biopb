@@ -5,7 +5,7 @@ import numpy as np
 from magicgui.widgets import ComboBox, create_widget
 
 from ._config import get_grid_params, save_config
-from ._widget_base import _WidgetBase
+from ._widget_base import _WidgetBase, _make_full_width
 
 if TYPE_CHECKING:
     import napari
@@ -76,8 +76,12 @@ class ObjectDetectionWidget(_WidgetBase):
                 self._progress_bar,
                 self._cancel_button,
                 self._run_button,
+                self._error_label,
             ]
         )
+
+        # Configure error label to span full width
+        _make_full_width(self._error_label)
 
     def _activte_advanced_inputs(self):
         """Toggle visibility of advanced settings widgets."""
