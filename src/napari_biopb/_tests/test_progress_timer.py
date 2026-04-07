@@ -1,11 +1,18 @@
 """Tests for progress bar timer behavior during long gRPC calls."""
 
+import os
+import sys
 import time
 import pytest
 from qtpy.QtCore import QTimer
 from napari_biopb._grpc import CALL_START
 
 
+# Skip on macOS CI due to OpenGL/vispy headless issues
+@pytest.mark.skipif(
+    sys.platform == "darwin" and os.getenv("CI") == "true",
+    reason="OpenGL context unavailable on macOS CI headless environment",
+)
 class TestProgressTimer:
     """Tests for the QTimer-based progress in _WidgetBase."""
 
@@ -201,6 +208,11 @@ class TestProgressTimer:
         ), f"Expected >= 3 progress updates, got {len([v for v in progress_values if v > 0])}"
 
 
+# Skip on macOS CI due to OpenGL/vispy headless issues
+@pytest.mark.skipif(
+    sys.platform == "darwin" and os.getenv("CI") == "true",
+    reason="OpenGL context unavailable on macOS CI headless environment",
+)
 class TestSignalDelivery:
     """Tests for signal delivery from thread workers."""
 

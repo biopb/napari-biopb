@@ -3,6 +3,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Generator, Optional, Tuple
 
 import biopb.image as proto
@@ -450,6 +451,80 @@ def grpc_object_detection(
             )
 
 
+def _process_single_chunk(
+    chunk: np.ndarray,
+    position: dict,
+    stub: proto.ProcessImageStub,
+    iter_spec: IterationSpec,
+    op_name: str,
+    kwargs: dict,
+    timeout: float,
+) -> Tuple[Optional[np.ndarray], dict, pd.DataFrame]:
+    """Process a single chunk via gRPC (for ThreadPoolExecutor).
+
+    Args:
+        chunk: Image chunk array
+        position: Dict mapping numeric dim indices to index values
+        stub: gRPC stub (thread-safe)
+        iter_spec: IterationSpec with axis_order
+        op_name: Operation name
+        kwargs: Operation kwargs
+        timeout: Request timeout in seconds
+
+    Returns:
+        Tuple of (output, position, annotation_data)
+    """
+    pixels = serialize_from_numpy(chunk, np_index_order=iter_spec.axis_order)
+
+    request = proto.ProcessRequest(
+        image_data=proto.ImageData(pixels=pixels),
+        op_name=op_name,
+        kwargs=dict_to_struct(kwargs),
+    )
+
+    future = stub.Run.future(request)
+
+    # Wait for completion (no abort polling here - handled at higher level)
+    response = future.result(timeout=timeout)
+
+    # Parse annotation
+    annotation_data = _parse_annotation_tsv(response.annotation)
+
+    # Check if response has image data
+    has_image = (
+        response.image_data is not None
+        and response.image_data.pixels is not None
+        and response.image_data.pixels.ByteSize() > 0
+    )
+
+    if has_image:
+        output = deserialize_to_numpy(
+            response.image_data.pixels, np_index_order="TZCYX"
+        )
+        output = output.astype(output.dtype.type)
+
+        # Validate: all iter dims must be singleton in output
+        for axis_name in iter_spec.iter_dims:
+            full_idx = FULL_ORDER.index(axis_name)
+            if output.shape[full_idx] != 1:
+                raise ValueError(
+                    f"Operation changed iterated dimension '{axis_name}' "
+                    f"from 1 to {output.shape[full_idx]}. "
+                    f"Cannot tile results when operation modifies iterated dimensions."
+                )
+
+        logger.debug(
+            "Processed chunk at position %s, output shape: %s",
+            position,
+            output.shape,
+        )
+    else:
+        output = None
+        logger.debug("Response at position %s has no image data", position)
+
+    return output, position, annotation_data
+
+
 @thread_worker
 def grpc_process_image(
     image_data: napari_data,
@@ -476,14 +551,19 @@ def grpc_process_image(
     Raises:
         ValueError: If operation changes iterated dimensions from singleton
     """
-    # Get timeout from config
+    # Get timeout and concurrency from config
     config = load_config()
     timeout = config["timeout"][
         "detection_3d" if "Z" in iter_spec.axis_order else "detection_2d"
     ]
+    max_concurrent = config["grpc"].get("max_concurrent_calls", 4)
 
     server = settings["Server"]
-    logger.info("Starting image processing on %s", server)
+    logger.info(
+        "Starting image processing on %s with max %d concurrent calls",
+        server,
+        max_concurrent,
+    )
 
     # Extract op_name and kwargs from settings
     op_name = settings.get("Op", "")
@@ -493,89 +573,84 @@ def grpc_process_image(
     with _get_grpc_channel(settings) as channel:
         stub = proto.ProcessImageStub(channel)
 
-        # Iterate over data using _data_iterator
-        for position, chunk in _data_iterator(
-            image_data, iter_spec.iter_dims, iter_spec.axis_order
-        ):
-            # Check for abort before processing each chunk
-            if abort_event is not None and abort_event.is_set():
-                logger.info("Image processing aborted by user")
-                return
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            futures = {}
 
-            chunk = np.array(chunk)
-            pixels = serialize_from_numpy(
-                chunk, np_index_order=iter_spec.axis_order
-            )
-
-            request = proto.ProcessRequest(
-                image_data=proto.ImageData(pixels=pixels),
-                op_name=op_name,
-                kwargs=dict_to_struct(kwargs),
-            )
-
-            # Signal call start for progress bar
-            yield CALL_START
-
-            future = stub.Run.future(request)
-
-            # Store future in container for direct cancellation from UI thread
-            if future_container is not None:
-                future_container["active"] = future
-
-            # Poll for abort while waiting for response
-            while not future.done():
+            # Submit all chunks for processing
+            for position, chunk in _data_iterator(
+                image_data, iter_spec.iter_dims, iter_spec.axis_order
+            ):
+                # Check for abort before submitting
                 if abort_event is not None and abort_event.is_set():
-                    future.cancel()
+                    logger.info("Image processing aborted during submission")
+                    # Cancel any already-submitted futures
+                    for f in futures:
+                        f.cancel()
+                    return
+
+                chunk = np.array(chunk)
+
+                # Submit to executor
+                future = executor.submit(
+                    _process_single_chunk,
+                    chunk,
+                    position,
+                    stub,
+                    iter_spec,
+                    op_name,
+                    kwargs,
+                    timeout,
+                )
+                futures[future] = position
+
+                # Signal call start for progress bar (one per chunk)
+                yield CALL_START
+
+            # Store all futures in container for cancellation from UI thread
+            if future_container is not None:
+                future_container["active"] = set(futures.keys())
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                # Check for abort during collection
+                if abort_event is not None and abort_event.is_set():
+                    logger.info("Image processing aborted during collection")
+                    # Cancel remaining futures
+                    for f in futures:
+                        f.cancel()
                     if future_container is not None:
                         future_container["active"] = None
-                    logger.info("gRPC Run call cancelled")
                     return
-                time.sleep(0.05)
 
-            # Clear future reference after call completes
+                # Remove completed future from active set
+                if future_container is not None:
+                    active_set = future_container.get("active", set())
+                    active_set.discard(future)
+                    future_container["active"] = active_set
+
+                try:
+                    output, position, annotation_data = future.result()
+                except grpc.FutureCancelledError:
+                    logger.info("gRPC Run call was cancelled")
+                    return
+                except Exception as e:
+                    logger.error(
+                        "Error processing chunk at position %s: %s",
+                        futures[future],
+                        e,
+                    )
+                    # Cancel remaining futures on error
+                    for f in futures:
+                        f.cancel()
+                    if future_container is not None:
+                        future_container["active"] = None
+                    raise
+
+                yield output, position, annotation_data
+
+            # Clear future reference after all complete
             if future_container is not None:
                 future_container["active"] = None
-
-            try:
-                response = future.result(timeout=timeout)
-            except grpc.FutureCancelledError:
-                logger.info("gRPC Run call was cancelled")
-                return
-
-            # Parse annotation from response
-            annotation_data = _parse_annotation_tsv(response.annotation)
-
-            # Check if response has image data
-            has_image = (
-                response.image_data is not None
-                and response.image_data.pixels is not None
-                and response.image_data.pixels.ByteSize() > 0
-            )
-
-            if has_image:
-                # Always decode with full 5D axis order
-                output = deserialize_to_numpy(
-                    response.image_data.pixels, np_index_order="TZCYX"
-                )
-                # Ensure native byte order
-                output = output.astype(output.dtype.type)
-
-                # Validate: all iter dims must be singleton in output
-                for axis_name in iter_spec.iter_dims:
-                    full_idx = FULL_ORDER.index(axis_name)
-                    if output.shape[full_idx] != 1:
-                        raise ValueError(
-                            f"Operation changed iterated dimension '{axis_name}' "
-                            f"from 1 to {output.shape[full_idx]}. "
-                            f"Cannot tile results when operation modifies iterated dimensions."
-                        )
-
-                logger.debug("Processed chunk, output shape: %s", output.shape)
-            else:
-                output = None
-                logger.debug("Response has no image data, only annotation")
-
-            yield output, position, annotation_data
 
 
 def _extract_kwargs(settings: dict) -> dict:

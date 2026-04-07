@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     },
     "grpc": {
         "max_message_size_mb": 512,
+        "max_concurrent_calls": 4,
     },
 }
 

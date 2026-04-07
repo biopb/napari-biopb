@@ -71,13 +71,22 @@ class _WidgetBase(Container):
         self._stop_all_progress()
         self._abort_event.set()
 
-        # Directly cancel the active gRPC future (if any) for immediate abort
-        active_future = self._active_future_container.get("active")
-        if active_future is not None:
-            try:
-                active_future.cancel()
-            except Exception:
-                pass  # Future may already be done
+        # Directly cancel the active gRPC futures (if any) for immediate abort
+        active_futures = self._active_future_container.get("active")
+        if active_futures is not None:
+            # Handle both single future and set of futures
+            if isinstance(active_futures, set):
+                for f in active_futures:
+                    try:
+                        f.cancel()
+                    except Exception:
+                        pass  # Future may already be done
+            else:
+                # Single future (for object detection which is still sequential)
+                try:
+                    active_futures.cancel()
+                except Exception:
+                    pass
             self._active_future_container["active"] = None
 
         worker.quit()
