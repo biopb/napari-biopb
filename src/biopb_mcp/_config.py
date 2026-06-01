@@ -57,8 +57,16 @@ DEFAULT_CONFIG = {
         "dask_distributed_address": "",
         "kernel_name": "python3",
         "kernel_startup_timeout": 60.0,
+        # execute_timeout now bounds only the *quick* in-band kernel snippets
+        # (screenshot / status / inspect / job submit+poll), not long jobs:
+        # execute_code runs agent code in a background thread that may run
+        # indefinitely (stop it with cancel_job / restart_kernel).
         "execute_timeout": 120.0,
         "busy_lock_timeout": 5.0,
+        # Seconds execute_code waits for a job to finish before "promoting" it:
+        # if it completes within this window the result is returned inline,
+        # otherwise a job handle (job_id) is returned and it keeps running.
+        "promote_after": 10.0,
         # Extra Host/Origin header values appended to the loopback allowlist
         # that guards the server against DNS-rebinding / cross-origin browser
         # requests. Set these only when fronting the server with a reverse

@@ -57,6 +57,7 @@ def _bootstrap_impl():
     from .._config import load_config
     from .._connection import TensorConnection
     from ..tensor_browser import TensorBrowserWidget
+    from . import _jobs
     from ._helpers import patch_viewer_load_tensor
     from ._process_ops import build_ops
 
@@ -101,9 +102,17 @@ def _bootstrap_impl():
         logger.exception("Failed to build ProcessImage ops")
         ops = {}
 
-    # 6. Namespace for execute_code.  client is refreshed per-call by the
-    #    server (the connection service connects asynchronously).
+    # 6. Async job runner: execute_code runs in a background kernel thread so
+    #    the main thread / Qt loop stays free for screenshot/status mid-job.
+    #    install() stores the shell, installs the thread-aware stdout streams,
+    #    and clears any prior job state; wrap_viewer_for_threads marshals the
+    #    common viewer-mutating methods to the Qt main thread.
     patch_viewer_load_tensor(viewer, conn)
+    _jobs.install(ip)
+    _jobs.wrap_viewer_for_threads(viewer)
+
+    # 7. Namespace for execute_code.  client is refreshed per-job by the job
+    #    runner (the connection service connects asynchronously).
     ip.user_ns.update(
         {
             "viewer": viewer,
@@ -113,5 +122,8 @@ def _bootstrap_impl():
             "ops": ops,
             "_conn": conn,
             "_dask_client": dask_client,
+            "_jobs": _jobs,
+            "run_on_main": _jobs.run_on_main,
+            "cancelled": _jobs.cancelled,
         }
     )

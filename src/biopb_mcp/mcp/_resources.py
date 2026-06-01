@@ -38,6 +38,12 @@ with napari integrated via `%gui qt`. Imports are allowed and variables persist 
 * Intermediate results should be put back on viewer to be validated by user before next step.
 * Do _not_ assume. Ask the user to clarify uncertainties - they know the data best.
 * After accomplishing a task, ask the user if a skill should be added to the agent's toolbox for future use.
+* `execute_code` will return a job handle (`job-N`) instead of the result for long-running code. Use `poll_job("job-N")` for status (running/ok/error/cancelled) and output so far.
+* Inside a job, the viewer lives on the kernel main thread, so GUI mutations must reach it from the worker thread. The common paths are handled automatically:
+`viewer.load_tensor(...)` and `viewer.add_image/add_labels/add_points/`
+`add_shapes/add_vectors/add_surface/add_tracks(...)`. For any other viewer
+mutation (`layer.data = ...`, contrast limits, camera, dims), wrap it:
+`run_on_main(lambda: setattr(layer, "contrast_limits", (0, 255)))`.
 
 ## Quick Examples
 ```python
