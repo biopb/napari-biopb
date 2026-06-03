@@ -27,23 +27,17 @@ with napari integrated via `%gui qt`. Imports are allowed and variables persist 
 | `da` | module | dask.array |
 | `ops` | dict[str, callable] | biopb.image ProcessImage operations from configured servers (may be empty) |
 
-* The viewer is a live desktop window; mutations show up immediately.
+* The viewer is a live desktop window. Mutations should be wrapped in `run_on_main()` to ensure execution on the main thread. The build-in methods, e.g. viewer.load_tensor(), are already wrapped.
 * Data from `TensorFlightClient` are lazy, thread-safe, picklable dask arrays.
 * `ops` maps op name -> a inspectable callable that runs dedicated image processing logics.
 
-## Operation Guardrails
-* All data are from `client` or `viewer`. Avoid direct accessing file systems unless specifically requested by user.
-* Prefer browsing the catalog through `client.query_sources(sql)` (server-side DuckDB, complete) rather than `client.list_sources()` (capped by the server for large catalogs).
+## Operation Guardrails **IMPORTANT**
+* All data shoulb be from `client` or `viewer`. Avoid direct accessing file systems unless specifically requested by user.
+* Prefer browsing the catalog through `client.query_sources(sql)` (server-side DuckDB, complete) than `client.list_sources()` (capped by the server for large catalogs).
 * Prefer lazy dask operations and only `.compute()` the final result.
-* Intermediate results should be put back on viewer to be validated by user before next step.
-* Do _not_ assume. Ask the user to clarify uncertainties - they know the data best.
+* Intermediate results should be put back on `viewer` to be validated by user at each step.
+* Do _not_ assume. Ask the user to clarify uncertainties - they know the data better than you do.
 * After accomplishing a task, ask the user if a skill should be added to the agent's toolbox for future use.
-* `execute_code` will return a job handle (`job-N`) instead of the result for long-running code. Use `poll_job("job-N")` for status (running/ok/error/cancelled) and output so far.
-* Inside a job, the viewer lives on the kernel main thread, so GUI mutations must reach it from the worker thread. The common paths are handled automatically:
-`viewer.load_tensor(...)` and `viewer.add_image/add_labels/add_points/`
-`add_shapes/add_vectors/add_surface/add_tracks(...)`. For any other viewer
-mutation (`layer.data = ...`, contrast limits, camera, dims), wrap it:
-`run_on_main(lambda: setattr(layer, "contrast_limits", (0, 255)))`.
 
 ## Quick Examples
 ```python
@@ -51,10 +45,11 @@ mutation (`layer.data = ...`, contrast limits, camera, dims), wrap it:
 print([(l.name, type(l).__name__, type(l.data).__name__) for l in viewer.layers])
 
 # Get data from the catalog and convert to np.ndarray
-np_arr = client.get_tensor("my_source_id").compute()
+dask_arr = client.get_tensor("my_source_id") # lazy, thread-safe, picklable
+np_arr = dask_arr.compute() # in memory
 
 # Take action then screenshot to verify
-viewer.dims.ndisplay = 3
+run_on_main(lambda: setattr(viewer.dims, "ndisplay", 3))
 ```
 
 ## Iterative Workflow for _very_ large data
@@ -88,8 +83,7 @@ layer = viewer.layers["image_name"]
 # Remove layer
 viewer.layers.remove(viewer.layers["name"])
 
-# Load data to viewer; auto-handles pyramid. Accepts any source_id, including
-# those beyond the list_sources() cap (fetched from the server on demand).
+# Load data to viewer; auto-handles pyramid. Accepts any valid source_id.
 layer_name = viewer.load_tensor(source_id="source_id", tensor_id=None, name=None)
 
 # Layer properties
@@ -158,8 +152,6 @@ else:
 ```
 
 ## Browse Sources
-For large catalogs the server caps `list_sources()`, so prefer the SQL query
-to discover source_ids; there is no pre-built `sources` dict in the namespace.
 ```python
 # Preferred: server-side DuckDB query (complete, not truncated).
 # The sources table has columns: source_id, source_url, source_type, metadata_json
@@ -183,7 +175,7 @@ layer_name = viewer.load_tensor("source_id")                   # single-tensor s
 layer_name = viewer.load_tensor("source_id", tensor_id="t1")   # multi-tensor source
 
 # Or get a lazy dask array directly, without adding a layer:
-arr = client.get_tensor("source_id", tensor_id=None)           # tensor_id optional if single
+arr = client.get_tensor("source_id", tensor_id="t1")           # tensor_id optional if single
 ```
 
 ## Upload to Server
