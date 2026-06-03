@@ -19,25 +19,66 @@ logger = logging.getLogger(__name__)
 def _configure_dask(mcp_config: dict):
     """Set up dask in the kernel process.
 
-    Returns a distributed ``Client`` when connecting to an external cluster,
-    otherwise ``None`` (in-process ``threads``/``synchronous`` scheduler).
+    Returns ``(client, cluster)``:
+
+    * ``"distributed"`` + an external ``dask_distributed_address`` -> a
+      ``Client`` attached to that scheduler; ``cluster`` is ``None``.
+    * ``"distributed"`` + no address -> a kernel-local multi-process
+      ``LocalCluster`` and a ``Client`` bound to it. This is the default and
+      the only mode where ``cancel_job`` can stop an in-flight ``compute()``.
+    * ``"threads"`` / ``"synchronous"`` -> in-process scheduler; both ``None``.
+
+    A failure spinning the local cluster degrades gracefully to the in-process
+    ``threads`` scheduler rather than aborting the bootstrap.
     """
     import dask
 
-    scheduler = mcp_config.get("dask_scheduler", "threads")
+    scheduler = mcp_config.get("dask_scheduler", "distributed")
     num_workers = mcp_config.get("dask_num_workers", 0) or None
     address = mcp_config.get("dask_distributed_address", "")
 
-    if scheduler == "distributed" and address:
-        from dask.distributed import Client
+    if scheduler == "distributed":
+        try:
+            from dask.distributed import Client
 
-        client = Client(address)
-        logger.info("Dask using distributed scheduler at %s", address)
-        return client
+            if address:
+                client = Client(address)
+                logger.info("Dask using distributed scheduler at %s", address)
+                return client, None
+
+            from dask.distributed import LocalCluster
+
+            cluster = LocalCluster(
+                n_workers=num_workers,
+                processes=True,
+                threads_per_worker=mcp_config.get(
+                    "dask_threads_per_worker", 1
+                ),
+                memory_limit=mcp_config.get("dask_memory_limit", "auto"),
+                dashboard_address=mcp_config.get(
+                    "dask_dashboard_address", "127.0.0.1:0"
+                ),
+            )
+            client = Client(cluster)
+            logger.info(
+                "Dask using local cluster: %d worker(s) at %s",
+                len(cluster.workers),
+                cluster.scheduler_address,
+            )
+            return client, cluster
+        except Exception:
+            # Covers a missing `distributed` install, an unreachable external
+            # address, or a LocalCluster spawn failure -- degrade to the
+            # in-process scheduler so the bootstrap (and the viewer) survives.
+            logger.exception(
+                "Distributed dask unavailable; "
+                "falling back to in-process threads scheduler"
+            )
+            scheduler = "threads"
 
     dask.config.set(scheduler=scheduler, num_workers=num_workers)
     logger.info("Dask scheduler: %s, num_workers: %s", scheduler, num_workers)
-    return None
+    return None, None
 
 
 def bootstrap():
@@ -70,7 +111,7 @@ def _bootstrap_impl():
     mcp_config = config.get("mcp", {})
 
     # 2. Configure dask in the compute process.
-    dask_client = _configure_dask(mcp_config)
+    dask_client, dask_cluster = _configure_dask(mcp_config)
 
     # 3. Data-access service, shared by the widget and the agent namespace.
     conn = TensorConnection(config)
@@ -122,6 +163,7 @@ def _bootstrap_impl():
             "ops": ops,
             "_conn": conn,
             "_dask_client": dask_client,
+            "_dask_cluster": dask_cluster,
             "_jobs": _jobs,
             "run_on_main": _jobs.run_on_main,
             "cancelled": _jobs.cancelled,

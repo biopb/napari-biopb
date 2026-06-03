@@ -393,6 +393,7 @@ dependencies = [
     { name = "vedo" },
 ]
 mcp = [
+    { name = "distributed" },
     { name = "ipykernel" },
     { name = "jupyter-client" },
     { name = "mcp" },
@@ -403,6 +404,7 @@ tables = [
     { name = "napari-skimage-regionprops" },
 ]
 testing = [
+    { name = "distributed" },
     { name = "ipykernel" },
     { name = "jupyter-client" },
     { name = "mcp" },
@@ -414,26 +416,25 @@ testing = [
     { name = "pytest-env" },
     { name = "pytest-qt" },
     { name = "tox" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "biopb", extras = ["tensor"], specifier = ">=0.5.4" },
+    { name = "biopb-mcp", extras = ["mcp"], marker = "extra == 'testing'" },
+    { name = "distributed", marker = "extra == 'mcp'" },
     { name = "grpcio-health-checking" },
     { name = "ipykernel", marker = "extra == 'mcp'" },
-    { name = "ipykernel", marker = "extra == 'testing'" },
     { name = "jupyter-client", marker = "extra == 'mcp'" },
-    { name = "jupyter-client", marker = "extra == 'testing'" },
     { name = "magicgui" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.20" },
-    { name = "mcp", marker = "extra == 'testing'", specifier = ">=1.20" },
     { name = "napari", marker = "extra == 'testing'" },
     { name = "napari-skimage-regionprops", marker = "extra == 'tables'" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "pandas" },
     { name = "psutil", marker = "extra == 'mcp'" },
-    { name = "psutil", marker = "extra == 'testing'" },
     { name = "pyqt6", marker = "extra == 'testing'" },
     { name = "pytest", marker = "extra == 'testing'" },
     { name = "pytest-cov", marker = "extra == 'testing'" },
@@ -1176,21 +1177,21 @@ name = "distributed"
 version = "2026.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version <= '3.10'" },
-    { name = "cloudpickle", marker = "python_full_version <= '3.10'" },
-    { name = "dask", marker = "python_full_version <= '3.10'" },
-    { name = "jinja2", marker = "python_full_version <= '3.10'" },
-    { name = "locket", marker = "python_full_version <= '3.10'" },
-    { name = "msgpack", marker = "python_full_version <= '3.10'" },
-    { name = "packaging", marker = "python_full_version <= '3.10'" },
-    { name = "psutil", marker = "python_full_version <= '3.10'" },
-    { name = "pyyaml", marker = "python_full_version <= '3.10'" },
-    { name = "sortedcontainers", marker = "python_full_version <= '3.10'" },
-    { name = "tblib", marker = "python_full_version <= '3.10'" },
-    { name = "toolz", marker = "python_full_version <= '3.10'" },
-    { name = "tornado", marker = "python_full_version <= '3.10'" },
-    { name = "urllib3", marker = "python_full_version <= '3.10'" },
-    { name = "zict", marker = "python_full_version <= '3.10'" },
+    { name = "click" },
+    { name = "cloudpickle" },
+    { name = "dask" },
+    { name = "jinja2" },
+    { name = "locket" },
+    { name = "msgpack" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "sortedcontainers" },
+    { name = "tblib" },
+    { name = "toolz" },
+    { name = "tornado" },
+    { name = "urllib3" },
+    { name = "zict" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e7/84/3e98a2d61493d201f253743091cbd4f099f502f957a9a33bb9ce5b8d5416/distributed-2026.3.0.tar.gz", hash = "sha256:4a8fc6102fededfbaae45288501276da2297a054d74eb6589f01b087c7f95c26", size = 2103970, upload-time = "2026-03-18T07:10:23.555Z" }
 wheels = [

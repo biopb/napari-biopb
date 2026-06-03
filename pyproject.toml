@@ -48,15 +48,12 @@ testing = [
     "pytest-env",  # https://github.com/qwertyquerty/pytest-env
     "napari",
     "pyqt6",
-    "mcp>=1.20",
-    "jupyter_client",
-    "ipykernel",
-    "psutil",
+    "biopb-mcp[mcp]",  # pull the MCP server deps so tests cover that path
 ]
 tables = [
     "napari-skimage-regionprops",  # For annotation table display
 ]
-mcp = ["mcp>=1.20", "uvicorn>=0.29", "jupyter_client", "ipykernel", "psutil"]
+mcp = ["mcp>=1.20", "uvicorn>=0.29", "jupyter_client", "ipykernel", "psutil", "distributed"]
 3d = ["vedo"] # 3d rendering from mesh
 
 [project.scripts]
