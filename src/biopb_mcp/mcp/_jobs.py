@@ -286,12 +286,22 @@ def cancel(job_id):
     if job.status != "running":
         return {"job_id": job_id, "cancelled": False, "status": job.status}
     job.cancel_event.set()
-    # Distributed dask: cancel in-flight futures (the only mid-compute stop).
-    # One job at a time, so the client's tracked futures belong to this job.
+    # Distributed dask: cancel in-flight futures.  This is what actually stops a
+    # blocking ``.compute()`` -- its tasks ARE registered in ``dc.futures`` for
+    # the duration of the internal ``gather``, so cancelling them makes that
+    # gather raise and unwinds the job thread.  ``dc.futures`` is keyed by task
+    # key *string*, so we must rebuild ``Future`` objects from those keys:
+    # ``Client.cancel`` filters its argument through ``futures_of()``, which
+    # silently drops bare strings -- ``cancel(list(dc.futures))`` cancels nothing.
+    # One job at a time, so every tracked future belongs to this job.
     dc = _ip.user_ns.get("_dask_client") if _ip is not None else None
     if dc is not None:
         try:
-            dc.cancel(list(dc.futures))
+            from distributed import Future
+
+            keys = list(dc.futures)
+            if keys:
+                dc.cancel([Future(k, dc) for k in keys], force=True)
         except Exception:  # noqa: BLE001 - cancel is best-effort
             logger.debug("distributed cancel failed", exc_info=True)
     return {"job_id": job_id, "cancelled": True, "status": job.status}

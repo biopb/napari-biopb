@@ -100,14 +100,34 @@ class TestJobRunnerUnit:
         assert snap["status"] == "cancelled"
         assert "stopped" in snap["stdout"]
 
-    def test_distributed_cancel_calls_client(self, runner):
+    def test_distributed_cancel_rebuilds_futures(self, runner):
+        # cancel() must rebuild real Future objects from dc.futures' string
+        # keys: Client.cancel() filters its arg through futures_of(), which
+        # silently drops bare strings -- so passing list(dc.futures) cancels
+        # nothing.  Assert real Futures (resolvable by futures_of) + force=True.
+        from distributed import Future
+        from distributed.client import futures_of
+
         calls = {}
 
-        class _StubClient:
-            futures = {"key-1": object(), "key-2": object()}
+        class _Loop:
+            def add_callback(self, fn, *a, **k):  # swallow Future.release()
+                pass
 
-            def cancel(self, keys):
-                calls["keys"] = list(keys)
+        class _StubClient:
+            futures = {"('grad', 0, 0)": object(), "('grad', 1, 0)": object()}
+            generation = 0
+            loop = _Loop()
+
+            def _inc_ref(self, key):
+                pass
+
+            def _dec_ref(self, key):
+                pass
+
+            def cancel(self, futures, force=False):
+                calls["futures"] = list(futures)
+                calls["force"] = force
 
         runner["_dask_client"] = _StubClient()
         jid = _jobs.submit(
@@ -115,7 +135,10 @@ class TestJobRunnerUnit:
         )["job_id"]
         time.sleep(0.05)
         _jobs.cancel(jid)
-        assert set(calls["keys"]) == {"key-1", "key-2"}
+        passed = calls["futures"]
+        assert passed and all(isinstance(f, Future) for f in passed)
+        assert {f.key for f in futures_of(passed)} == set(_StubClient.futures)
+        assert calls["force"] is True
         self._wait(jid)
 
     def test_poll_unknown_job(self, runner):

@@ -33,6 +33,28 @@ with napari integrated via `%gui qt`. Imports are allowed and variables persist 
 * Data from `TensorFlightClient` are lazy, thread-safe, picklable dask arrays.
 * `ops` maps op name -> an inspectable callable that runs dedicated image-processing logic.
 
+## Long-running jobs & cancellation
+A slow `execute_code` call runs in a background thread and returns a `job-N` handle;
+watch it with `poll_job` / `take_screenshot` / `server_status`, stop it with `cancel_job`
+(graceful) or `restart_kernel` (guaranteed, kills the kernel). To stay stoppable:
+* **A blocking `.compute()` is interruptible** — `cancel_job` cancels the in-flight dask
+  tasks, so the `.compute()` raises and the job ends. No special pattern needed.
+* **Your own long loops** (per-chunk / per-file) have no dask futures to cancel, so poll
+  `cancelled()` and `break` yourself.
+* **Progress + responsive cancel on a big graph:** submit with the distributed client
+  (`_dask_client`, present only under the distributed scheduler) and consume results as
+  they land — this also gives a live processed count via `poll_job`:
+  ```python
+  from dask.distributed import as_completed
+  futs = _dask_client.compute(list_of_dask_results)   # list of Futures, non-blocking
+  done = []
+  for fut in as_completed(futs):
+      if cancelled():
+          _dask_client.cancel(futs); break
+      done.append(fut.result())
+      print(f"{len(done)}/{len(futs)} done", flush=True)   # visible via poll_job
+  ```
+
 ## Operation Guardrails **IMPORTANT**
 * All data should be from `client` or `viewer`. Avoid directly accessing the file system unless specifically requested by the user.
 * Prefer browsing the catalog through `client.query_sources(sql)` (server-side DuckDB, complete) than `client.list_sources()` (capped by the server for large catalogs).
