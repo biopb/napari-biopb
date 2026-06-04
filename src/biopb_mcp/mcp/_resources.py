@@ -26,13 +26,15 @@ with napari integrated via `%gui qt`. Imports are allowed and variables persist 
 | `np` | module | numpy |
 | `da` | module | dask.array |
 | `ops` | dict[str, callable] | biopb.image ProcessImage operations from configured servers (may be empty) |
+| `run_on_main` | callable | `run_on_main(fn)` runs `fn` on the Qt main thread and returns its result; required for viewer mutations from a job thread (no-op on the main thread) |
+| `cancelled` | callable | `cancelled()` -> True if the running job has been asked to cancel; poll it in long loops for cooperative cancellation |
 
-* The viewer is a live desktop window. Mutations should be wrapped in `run_on_main()` to ensure execution on the main thread. The build-in methods, e.g. viewer.load_tensor(), are already wrapped.
+* The viewer is a live desktop window. Reads are safe from a job thread, but mutations must run on the main thread — wrap them in `run_on_main()`. `viewer.load_tensor()` and the `viewer.add_*()` family are already wrapped; everything else (layer properties, `viewer.dims`, `viewer.camera`, callback registration) is not.
 * Data from `TensorFlightClient` are lazy, thread-safe, picklable dask arrays.
-* `ops` maps op name -> a inspectable callable that runs dedicated image processing logics.
+* `ops` maps op name -> an inspectable callable that runs dedicated image-processing logic.
 
 ## Operation Guardrails **IMPORTANT**
-* All data shoulb be from `client` or `viewer`. Avoid direct accessing file systems unless specifically requested by user.
+* All data should be from `client` or `viewer`. Avoid directly accessing the file system unless specifically requested by the user.
 * Prefer browsing the catalog through `client.query_sources(sql)` (server-side DuckDB, complete) than `client.list_sources()` (capped by the server for large catalogs).
 * Prefer lazy dask operations and only `.compute()` the final result.
 * Intermediate results should be put back on `viewer` to be validated by user at each step.
@@ -60,7 +62,7 @@ arr = client.get_tensor("raw_data_id")
 # 2. Process
 mask_arr = arr > 0.5
 
-# 3. Upload Will call compute() chunk by chunk under the hood.
+# 3. Upload. Calls compute() chunk by chunk under the hood.
 source_id = client.upload_array(mask_arr, "cache:thresholded_v1")
 
 # 4. Display in viewer for user inspection and approval before next step
@@ -71,36 +73,46 @@ layer_name = viewer.load_tensor(source_id)
 VIEWER = """\
 # Viewer Operations
 
+**Threading:** reads are safe from a job thread, but every *mutation* must run on
+the Qt main thread. `viewer.load_tensor()` and the `viewer.add_*()` family are
+already wrapped for you. For anything else — layer properties, `viewer.dims`,
+`viewer.layers.remove()`, `viewer.camera`, registering callbacks — wrap the
+mutation in `run_on_main()` (a no-op when already on the main thread). Batch
+related mutations into one `run_on_main()` call.
+
 ## Layers
 ```python
-# List all layers
+# List all layers (read — no run_on_main needed)
 for layer in viewer.layers:
     print(f"{layer.name}: {type(layer).__name__} {layer.data.shape} {layer.data.dtype}")
 
-# Get specific layer
+# Get specific layer (read)
 layer = viewer.layers["image_name"]
 
-# Remove layer
-viewer.layers.remove(viewer.layers["name"])
+# Remove layer (mutation — wrap it)
+run_on_main(lambda: viewer.layers.remove(viewer.layers["name"]))
 
 # Load data to viewer; auto-handles pyramid. Accepts any valid source_id.
+# (already wrapped — call directly)
 layer_name = viewer.load_tensor(source_id="source_id", tensor_id=None, name=None)
 
-# Layer properties
-layer = viewer.layers["name"]
-layer.visible = False
-layer.opacity = 0.7
-layer.colormap = "viridis"
-layer.contrast_limits = [0, 255]
-layer.blending = "additive"         # "translucent", "additive", "minimum", "opaque"
+# Layer properties (mutations — batch into one run_on_main call)
+def _style():
+    layer = viewer.layers["name"]
+    layer.visible = False
+    layer.opacity = 0.7
+    layer.colormap = "viridis"
+    layer.contrast_limits = [0, 255]
+    layer.blending = "additive"     # "translucent", "additive", "minimum", "opaque"
+run_on_main(_style)
 ```
 
 ## Dimensions (sliders)
 ```python
-# Set slider position (e.g. time axis=0 to frame 50)
-viewer.dims.set_point(axis=0, value=50)
+# Set slider position (mutation — wrap it; e.g. time axis=0 to frame 50)
+run_on_main(lambda: viewer.dims.set_point(axis=0, value=50))
 
-# Get current position
+# Get current position (read)
 print(viewer.dims.point)    # tuple of current positions
 ```
 
@@ -123,7 +135,8 @@ def on_click(viewer, event):
         coord = layer.world_to_data(event.position)  # full-ndim data coords (…,z,y,x)
         print(event.button, list(event.modifiers), coord)
 
-viewer.mouse_drag_callbacks.append(on_click)   # mutate in place (see below)
+# Register from the main thread (mutation), and mutate the list in place (below)
+run_on_main(lambda: viewer.mouse_drag_callbacks.append(on_click))
 ```
 
 If a callback "doesn't fire", it is one of these — NOT a session/setup bug, and
@@ -212,7 +225,7 @@ inspect_object("viewer.add_shapes")
 
 OPS = """\
 ## Image Processing Ops (`ops`)
-`ops` maps op name -> a thin callable that runs one `biopb.image.ProcessImage`
+`ops` maps op name -> a thin callable that runs one `biopb.image.ProcessImage` op.
 Discover and inspect them before use — each carries a docstring with its server, labels,
 input-shape hints, and default kwargs:
 ```python
