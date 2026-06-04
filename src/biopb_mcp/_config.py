@@ -69,6 +69,14 @@ DEFAULT_CONFIG = {
         # LocalCluster sizing (used only when spinning a local cluster).
         "dask_threads_per_worker": 1,
         "dask_memory_limit": "auto",
+        # Cluster-wide chunk-cache budget for the data-plane client, split
+        # evenly across dask workers (each worker caches budget // n_workers).
+        # Bounds aggregate cache regardless of worker count -- the per-process
+        # client cache is otherwise replicated in every worker. Accepts a
+        # human-readable size ("1G", "512M", "2GiB") or an int (bytes), parsed
+        # with dask.utils.parse_bytes. Localhost servers cache nothing
+        # regardless (the tensor server already caches); this applies to remote.
+        "dask_cache_budget": "1G",
         # Bokeh dashboard bind address; loopback-only to match the server's
         # loopback-only security model. ":0" picks a free port.
         "dask_dashboard_address": "127.0.0.1:0",

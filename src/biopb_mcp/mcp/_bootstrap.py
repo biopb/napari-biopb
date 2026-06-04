@@ -81,6 +81,54 @@ def _configure_dask(mcp_config: dict):
     return None, None
 
 
+def _register_cache_plugin(
+    dask_client, url, token, mcp_config: dict, planned_workers=None
+):
+    """Pin a cluster-wide data-plane chunk-cache budget across dask workers.
+
+    Splits ``mcp.dask_cache_budget`` evenly across the live workers and installs
+    a worker-init plugin so each worker (current and future) caps its per-process
+    cache at ``budget // n_workers``. No-op without a distributed client; the
+    plugin itself resolves a localhost server to no cache. Best-effort: a failure
+    here must not break the connect flow that invokes it.
+
+    Called from ``TensorConnection.on_connect`` with the final ``(url, token)``
+    (the token is only known after connect).
+    """
+    if dask_client is None:
+        return
+    try:
+        from dask.utils import parse_bytes
+
+        from biopb.tensor.client import make_cache_plugin
+
+        budget_cfg = mcp_config.get("dask_cache_budget", "1G")
+        budget = (
+            int(budget_cfg)
+            if isinstance(budget_cfg, (int, float))
+            else parse_bytes(budget_cfg)
+        )
+        n_workers = planned_workers or len(
+            dask_client.scheduler_info().get("workers", {})
+        )
+        n_workers = max(1, n_workers)
+        per_worker = max(0, budget // n_workers)
+
+        plugin = make_cache_plugin(url, token, per_worker)
+        if plugin is None:
+            return
+        dask_client.register_plugin(plugin)
+        logger.info(
+            "Chunk-cache budget %s -> %d B/worker across %d workers (%s)",
+            budget_cfg,
+            per_worker,
+            n_workers,
+            url,
+        )
+    except Exception:
+        logger.exception("Failed to register chunk-cache budget plugin")
+
+
 def bootstrap():
     """Entry point called from the kernel's exec_lines."""
     try:
@@ -115,6 +163,24 @@ def _bootstrap_impl():
 
     # 3. Data-access service, shared by the widget and the agent namespace.
     conn = TensorConnection(config)
+
+    # 3b. Pin a bounded, cluster-wide chunk-cache budget across the worker
+    #     processes. The data-plane client's per-process cache is otherwise
+    #     replicated in every worker (budget x n_workers); splitting one budget
+    #     across workers bounds the aggregate. A localhost server resolves to no
+    #     cache regardless, so this only bites for remote servers. Registered via
+    #     the connect hook because the token is only final after connect, and
+    #     re-runs on reconnect (the plugin is named, so re-registration replaces).
+    #     Divide by the cluster's *planned* worker count (worker_spec), not the
+    #     live scheduler count, which lags while workers are still registering.
+    planned_workers = (
+        len(dask_cluster.worker_spec)
+        if dask_cluster is not None and hasattr(dask_cluster, "worker_spec")
+        else None
+    )
+    conn.on_connect = lambda url, token: _register_cache_plugin(
+        dask_client, url, token, mcp_config, planned_workers
+    )
 
     # 4. Visible napari viewer + Tensor Browser (auto-connects on its own tick).
     viewer = napari.Viewer()
