@@ -102,6 +102,14 @@ DEFAULT_CONFIG = {
         # Each is queried via GetOpNames and exposed as callables in the
         # agent kernel's `ops` dict.
         "process_image_servers": [],
+        # Prefer the gRPC socket over the tensor server's /dev/shm fast-path.
+        # Translated into BIOPB_SHM_TRANSFER_DISABLED in the kernel env by
+        # __main__.py. The shm path creates+writes+unlinks a fresh POSIX
+        # segment per chunk, which measured ~2.4-3x slower than the socket for
+        # large localhost chunks; this is a stopgap until the shm path is fixed
+        # (biopb/biopb#<shm-issue>). No-op on Windows (no POSIX shm). Off by
+        # default to preserve current behavior; the installer seeds it on.
+        "tensor_disable_shm": False,
     },
 }
 
