@@ -58,6 +58,52 @@ def test_getattr_delegates_to_dask(base):
     assert float(reduced.compute()) == float(base.mean().compute())
 
 
+@pytest.mark.parametrize(
+    "op, expected",
+    [
+        (lambda w: w + 1, lambda b: b + 1),
+        (lambda w: 1 + w, lambda b: 1 + b),
+        (lambda w: w > 5, lambda b: b > 5),
+        (lambda w: -w, lambda b: -b),
+        (lambda w: np.add(w, 1), lambda b: np.add(b, 1)),
+        (lambda w: np.greater(w, 5), lambda b: np.greater(b, 5)),
+    ],
+)
+def test_operators_forward_lazily_to_dask(base, op, expected):
+    """Operators/comparisons/ufuncs delegate to the dask array and stay lazy.
+
+    __getattr__ cannot delegate operator dunders (Python looks them up on the
+    type), so this exercises NDArrayOperatorsMixin + __array_ufunc__.
+    """
+    w = _ViewerArray(base, "threads")
+    result = op(w)
+    # Plain lazy dask array (not a re-wrapped proxy, not eagerly computed).
+    assert isinstance(result, da.Array)
+    assert not isinstance(result, _ViewerArray)
+    np.testing.assert_array_equal(result.compute(), expected(base).compute())
+
+
+def test_operators_never_trigger_compute(base):
+    """An operator must not invoke __array__ (no in-process materialization)."""
+
+    class _NoCompute(_ViewerArray):
+        def __array__(self, dtype=None, copy=None):
+            raise AssertionError("operator triggered __array__/compute")
+
+    w = _NoCompute(base, "threads")
+    # Would raise if the operator path went through __array__ instead of dask.
+    assert isinstance(w + 1, da.Array)
+    assert isinstance(w > 5, da.Array)
+
+
+def test_unhashable_like_dask(base):
+    """Mirrors dask arrays (elementwise __eq__ -> unhashable); napari never
+    hashes layer .data."""
+    w = _ViewerArray(base, "threads")
+    with pytest.raises(TypeError):
+        hash(w)
+
+
 def test_wrap_levels_single_array(base):
     wrapped = wrap_levels(base, "threads")
     assert isinstance(wrapped, _ViewerArray)

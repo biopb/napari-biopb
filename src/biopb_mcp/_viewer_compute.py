@@ -14,24 +14,36 @@ forces the *implicit* materialization napari performs (``np.asarray`` ->
 slice reads run in the kernel main process against the one shared
 ``conn.client`` chunk cache: ~100% hit on revisit, 1x memory, no scatter.
 
-Only the implicit ``__array__`` coercion is special-cased. Every other
-attribute -- ``.compute()``, ``.mean()``, ``.rechunk()``, arithmetic -- delegates
-to the underlying dask array, so the agent's explicit computes on a layer's
-``.data`` still use the distributed default. The viewer being serial is exactly
-why pinning its reads is free.
+Only ``__array__`` (implicit ``np.asarray`` coercion) and ``__getitem__`` (the
+slice it coerces) are pinned to the single-process scheduler. Everything else
+delegates to the underlying dask array and stays lazy on the default
+(distributed) scheduler: attribute/method access (``.compute()``, ``.mean()``,
+``.rechunk()``) via ``__getattr__``, and operators / comparisons / NumPy ufuncs
+(``data + 1``, ``data > 0``, ``np.add(data, 1)``) via ``__array_ufunc__``, which
+returns a plain dask array. So the agent's explicit computes on a layer's
+``.data`` still use the cluster. The viewer being serial is exactly why pinning
+its reads is free.
 """
 
 import numpy as np
+from numpy.lib.mixins import NDArrayOperatorsMixin
 
 
-class _ViewerArray:
+class _ViewerArray(NDArrayOperatorsMixin):
     """Array-like proxy that computes implicit materializations in-process.
 
     Wraps a lazy dask array. ``__array__`` (what ``np.asarray`` calls, the path
     napari uses to realize a slice) computes with the configured single-process
     *scheduler*; ``__getitem__`` re-wraps so the sliced array napari materializes
-    stays pinned. Everything else delegates to the underlying dask array, so the
-    array stays usable as a normal dask collection for explicit agent computes.
+    stays pinned.
+
+    Everything else behaves like the underlying dask array: ``__getattr__``
+    delegates attribute/method access, and ``NDArrayOperatorsMixin`` +
+    ``__array_ufunc__`` forward operators / comparisons / ufuncs to it lazily
+    (returning a plain dask array, *not* a re-wrapped proxy) — Python looks up
+    operator dunders on the type, so ``__getattr__`` alone cannot delegate them.
+    Like a dask array, this proxy is unhashable (it has an elementwise
+    ``__eq__``); napari never hashes layer ``.data``.
     """
 
     __slots__ = ("_arr", "_scheduler")
@@ -39,6 +51,22 @@ class _ViewerArray:
     def __init__(self, arr, scheduler: str = "threads"):
         self._arr = arr
         self._scheduler = scheduler
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        # Forward operators/comparisons/ufuncs (data + 1, data > 0, np.add(...))
+        # to the underlying dask array: unwrap any _ViewerArray operand, then let
+        # NumPy dispatch to dask's own __array_ufunc__. The result is a plain
+        # lazy dask array on the default (distributed) scheduler -- not re-wrapped
+        # -- so derived agent expressions are not pinned to the viewer scheduler.
+        inputs = tuple(
+            x._arr if isinstance(x, _ViewerArray) else x for x in inputs
+        )
+        out = kwargs.get("out")
+        if out is not None:
+            kwargs["out"] = tuple(
+                x._arr if isinstance(x, _ViewerArray) else x for x in out
+            )
+        return getattr(ufunc, method)(*inputs, **kwargs)
 
     def __array__(self, dtype=None, copy=None):
         # napari realizes a slice via ``np.asarray(data[slices])``; force that
