@@ -73,6 +73,11 @@ def main():
     def _cleanup_dask_dir():
         shutil.rmtree(dask_local_dir, ignore_errors=True)
 
+    # Register now (before host.start()) so the scratch dir is still removed on
+    # interpreter exit if start() raises. rmtree(ignore_errors) makes this and
+    # the explicit calls on the os._exit paths harmless if they both run.
+    atexit.register(_cleanup_dask_dir)
+
     host = KernelHost(
         extra_arguments=extra_arguments,
         kernel_name=mcp_config.get("kernel_name", "python3"),
@@ -94,7 +99,6 @@ def main():
     host.start()
     logger.info("Kernel ready.")
 
-    atexit.register(_cleanup_dask_dir)
     atexit.register(host.shutdown)
 
     def _handle_signal(signum, frame):

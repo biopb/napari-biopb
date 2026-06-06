@@ -351,8 +351,8 @@ class TestParentDeathPipe:
 
         assert _deathwatch.install() is True
         os.close(w)  # launcher "dies" -> read end sees EOF
+        # The watcher closes the read end itself (in its finally), so we don't.
         assert _wait_until(lambda: bool(killed), timeout=5.0, interval=0.05)
-        os.close(r)
         assert killed[0][1] == signal.SIGKILL
 
     @posix_only

@@ -37,13 +37,24 @@ def install() -> bool:
 
     def _watch():
         try:
-            # Blocks until the launcher closes its write end (process death),
-            # at which point os.read returns b"" (EOF). The launcher never
-            # writes, so any returned byte is spurious — keep waiting.
-            while os.read(fd, 1):
+            try:
+                # Blocks until the launcher closes its write end (process
+                # death), at which point os.read returns b"" (EOF). The
+                # launcher never writes, so any byte returned is spurious —
+                # keep waiting.
+                while os.read(fd, 1):
+                    pass
+            except OSError:
+                # The fd is broken / was never inherited: the watcher can't
+                # function. Do NOT treat this as launcher death — self-killing
+                # here would take the kernel down at startup. Just stop.
+                return
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
                 pass
-        except OSError:
-            pass
+        # Clean EOF: the launcher process has died — self-terminate.
         _self_terminate()
 
     threading.Thread(
