@@ -52,9 +52,13 @@ def _snapshot(
 def reset_server_state():
     old_host = _server._kernel_host
     old_promote = _server._promote_after
+    old_headless = _server._headless
+    old_instructions = _server.mcp._mcp_server.instructions
     yield
     _server._kernel_host = old_host
     _server._promote_after = old_promote
+    _server._headless = old_headless
+    _server.mcp._mcp_server.instructions = old_instructions
 
 
 @pytest.fixture
@@ -116,6 +120,16 @@ class TestTakeScreenshot:
         assert result[0].type == "text"
         assert "not initialized" in result[0].text
 
+    def test_headless_returns_message_without_touching_kernel(
+        self, server_with_host
+    ):
+        _server.set_headless(True)
+        result = _server.take_screenshot()
+        assert result[0].type == "text"
+        assert "headless" in result[0].text.lower()
+        # Must short-circuit before dispatching into the kernel.
+        server_with_host.execute.assert_not_called()
+
     def test_returns_png_image_from_delimited_stdout(self, server_with_host):
         data = base64.b64encode(b"fake-png-bytes").decode()
         server_with_host.execute.return_value = _result(
@@ -145,6 +159,32 @@ class TestTakeScreenshot:
         _server.take_screenshot(canvas_only=False)
         snippet = server_with_host.execute.call_args[0][0]
         assert "canvas_only=False" in snippet
+
+
+# -----------------------------------------------------------------------
+# headless mode
+# -----------------------------------------------------------------------
+
+
+class TestSetHeadless:
+    def test_headless_sets_handshake_instructions(self):
+        _server.set_headless(True)
+        instr = _server.mcp._mcp_server.instructions
+        assert instr is not None
+        assert "HEADLESS" in instr
+        # The directive is conditioned on the user reaching for the viewer.
+        assert "viewer" in instr.lower()
+
+    def test_visible_does_not_set_instructions(self):
+        _server.mcp._mcp_server.instructions = None
+        _server.set_headless(False)
+        assert _server._headless is False
+        assert _server.mcp._mcp_server.instructions is None
+
+    def test_server_status_reports_display_mode(self, server_with_host):
+        _server.set_headless(True)
+        out = _server.server_status()
+        assert "headless (no viewer)" in out
 
 
 # -----------------------------------------------------------------------

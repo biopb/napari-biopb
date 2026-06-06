@@ -1,7 +1,8 @@
 """Launcher for the biopb-mcp MCP server.
 
 This process *is* the MCP server: it owns a child Jupyter kernel that hosts a
-visible napari viewer (requires ``$DISPLAY``).  Run it with::
+visible napari viewer when a display is available, or a compute-only headless
+kernel when none is (see ``mcp.display_mode``).  Run it with::
 
     biopb-mcp        # console script
     python -m biopb_mcp.mcp
@@ -40,6 +41,30 @@ def _parse_args(argv, default_transport, default_port):
         help="Port for the http transport (ignored for stdio).",
     )
     return parser.parse_args(argv)
+
+
+def _has_display():
+    """Whether a GUI display is available for a visible napari viewer.
+
+    macOS / Windows always have a window server; on Linux it gates on an X11
+    ($DISPLAY) or Wayland ($WAYLAND_DISPLAY) session being set.
+    """
+    if sys.platform == "darwin" or os.name == "nt":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _resolve_headless(display_mode, has_display):
+    """Map ``mcp.display_mode`` + display availability to a headless bool.
+
+    ``"headless"`` -> always; ``"visible"`` -> never (the caller fails fast if
+    no display); ``"auto"`` / anything else -> headless only when no display.
+    """
+    if display_mode == "headless":
+        return True
+    if display_mode == "visible":
+        return False
+    return not has_display
 
 
 def _open_kernel_log(mcp_config):
@@ -81,6 +106,22 @@ def main(argv=None):
     transport = opts.transport
     port = opts.port
 
+    # Decide whether the kernel opens a visible viewer. With no display, a Qt
+    # viewer hard-aborts the kernel (SIGABRT, not a catchable error), so unless
+    # the user demands "visible" we degrade to a compute-only headless kernel.
+    display_mode = mcp_config.get("display_mode", "auto")
+    has_display = _has_display()
+    if display_mode == "visible" and not has_display:
+        kernel_log_path = mcp_config.get("kernel_log") or "the kernel log"
+        logger.error(
+            "display_mode='visible' but no display detected "
+            "($DISPLAY/$WAYLAND_DISPLAY are unset). Start an X/Wayland session, "
+            "or set mcp.display_mode to 'auto' or 'headless'. (Kernel output: %s)",
+            kernel_log_path,
+        )
+        return 2
+    headless = _resolve_headless(display_mode, has_display)
+
     bootstrap_line = "import biopb_mcp.mcp._bootstrap as _b; _b.bootstrap()"
     extra_arguments = [f"--IPKernelApp.exec_lines={bootstrap_line}"]
 
@@ -95,6 +136,12 @@ def main(argv=None):
     kernel_env = os.environ.copy()
     kernel_env.setdefault("OPENBLAS_NUM_THREADS", "1")
     kernel_env.setdefault("OMP_NUM_THREADS", "1")
+
+    # Tell the kernel bootstrap to skip Qt/napari and bind `viewer` to a
+    # headless sentinel (compute-only). Resolved here so the launcher owns the
+    # display decision (and can fail fast for display_mode='visible').
+    if headless:
+        kernel_env["BIOPB_HEADLESS"] = "1"
 
     # Prefer the gRPC socket over the tensor server's /dev/shm fast-path: the
     # shm path creates+writes+unlinks a fresh POSIX segment per chunk, measured
@@ -154,8 +201,16 @@ def main(argv=None):
     )
     _server.set_kernel_host(host)
     _server.set_promote_after(mcp_config.get("promote_after", 10.0))
+    # Surfaces headless state to the agent (initialize `instructions`) and the
+    # viewer-dependent tools (take_screenshot / server_status).
+    _server.set_headless(headless)
 
-    logger.info("Starting napari kernel (a viewer window will appear)...")
+    if headless:
+        logger.info(
+            "Starting kernel in headless mode (no viewer; no display)."
+        )
+    else:
+        logger.info("Starting napari kernel (a viewer window will appear)...")
     host.start()
     logger.info("Kernel ready.")
 
@@ -195,4 +250,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

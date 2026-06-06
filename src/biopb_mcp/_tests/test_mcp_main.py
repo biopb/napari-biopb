@@ -8,7 +8,12 @@ import sys
 
 import pytest
 
-from biopb_mcp.mcp.__main__ import _open_kernel_log, _parse_args
+from biopb_mcp.mcp.__main__ import (
+    _has_display,
+    _open_kernel_log,
+    _parse_args,
+    _resolve_headless,
+)
 
 
 class TestParseArgs:
@@ -72,3 +77,42 @@ class TestOpenKernelLog:
             {"kernel_log": "/nonexistent_dir/deep/path/kernel.log"}
         )
         assert f is sys.stderr
+
+
+class TestHasDisplay:
+    def test_linux_gates_on_display_env(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr("os.name", "posix")
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        assert _has_display() is False
+        monkeypatch.setenv("DISPLAY", ":0")
+        assert _has_display() is True
+
+    def test_linux_wayland_counts(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr("os.name", "posix")
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        assert _has_display() is True
+
+    def test_macos_always_has_display(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        assert _has_display() is True
+
+
+class TestResolveHeadless:
+    def test_explicit_headless_always_true(self):
+        assert _resolve_headless("headless", True) is True
+        assert _resolve_headless("headless", False) is True
+
+    def test_explicit_visible_always_false(self):
+        # The launcher fails fast separately when visible + no display.
+        assert _resolve_headless("visible", False) is False
+        assert _resolve_headless("visible", True) is False
+
+    def test_auto_follows_display(self):
+        assert _resolve_headless("auto", True) is False
+        assert _resolve_headless("auto", False) is True

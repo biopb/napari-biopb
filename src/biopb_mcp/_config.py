@@ -57,6 +57,18 @@ DEFAULT_CONFIG = {
         # identical either way. Overridable per-launch with `--transport`.
         "transport": "stdio",
         "port": 8765,
+        # Whether the kernel opens a visible napari viewer:
+        #   "auto"    -> visible if a display is present ($DISPLAY/$WAYLAND_DISPLAY
+        #                on Linux; always present on macOS/Windows), else headless.
+        #   "visible" -> require a display; fail fast at startup if none (preserves
+        #                the shared-viewer contract — see docs/biopb-architecture.md).
+        #   "headless"-> never open a viewer (compute-only: client/ops/execute_code
+        #                work, take_screenshot and viewer.* do not).
+        # Headless avoids a hard Qt abort when launched from a CLI with no display
+        # (e.g. an MCP client over stdio on a remote box). The agent is told via
+        # the initialize `instructions` field, and viewer-dependent tools return a
+        # clear message; the `viewer` namespace object self-describes on access.
+        "display_mode": "auto",
         # Where the child kernel's *native* (C-level) stdout/stderr is written
         # in stdio mode, so it never corrupts the JSON-RPC stream on fd 1.
         # Empty -> ~/.config/biopb-mcp/kernel.log. Ignored in http mode (the

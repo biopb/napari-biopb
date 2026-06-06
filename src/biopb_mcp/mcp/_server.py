@@ -27,6 +27,26 @@ _kernel_host: KernelHost | None = None
 # instead of an inline result (set from config by the launcher).
 _promote_after: float = 10.0
 
+# Compute-only mode: no display, so the kernel has no napari viewer. Set by the
+# launcher (set_headless) before serving. Viewer-dependent tools return a clear
+# message and the agent is told via the initialize `instructions` field.
+_headless: bool = False
+
+# Handed to the client in the initialize handshake (the only handshake-time
+# carrier MCP defines). Clients that honor it inject it into the model's
+# context from the first turn; phrased to fire only when the user actually
+# reaches for the viewer (compliance is up to the client/agent).
+_HEADLESS_INSTRUCTIONS = (
+    "This biopb-mcp session is running HEADLESS: it was started without a "
+    "display, so there is NO napari viewer window and screenshots are not "
+    "available. If the user asks to access, open, view, or look at the biopb "
+    "viewer/napari (or asks for a screenshot), alert them plainly that no "
+    "viewer is available in this session because it started without a display. "
+    "You can still load data, run image-processing ops, and compute results "
+    "via execute_code (using client and ops); offer results as values/arrays. "
+    "Do not call take_screenshot or use viewer.* methods."
+)
+
 # DNS-rebinding / cross-origin protection (review finding A2).  execute_code is
 # a full kernel (RCE by design), so the only thing standing between a malicious
 # page in the user's own browser and the loopback port is Host/Origin
@@ -158,10 +178,13 @@ else:
 
 print("")
 print("## Viewer")
-print("  layers: " + str(len(viewer.layers)))
-for _layer in list(viewer.layers)[:10]:
-    _shape = getattr(_layer.data, "shape", "?")
-    print("    - " + str(_layer.name) + " (" + str(_shape) + ")")
+if viewer:
+    print("  layers: " + str(len(viewer.layers)))
+    for _layer in list(viewer.layers)[:10]:
+        _shape = getattr(_layer.data, "shape", "?")
+        print("    - " + str(_layer.name) + " (" + str(_shape) + ")")
+else:
+    print("  headless: no viewer (no display)")
 
 print("")
 print("## Jobs")
@@ -191,6 +214,17 @@ def set_promote_after(seconds: float):
     """Set how long execute_code waits inline before returning a job handle."""
     global _promote_after
     _promote_after = float(seconds)
+
+
+def set_headless(headless: bool):
+    """Mark the session compute-only (no viewer) and, when so, advertise it to
+    the agent via the initialize ``instructions`` field."""
+    global _headless
+    _headless = bool(headless)
+    if _headless:
+        # The low-level Server holds the `instructions` returned in the
+        # handshake; FastMCP built it at import with None, so set it here.
+        mcp._mcp_server.instructions = _HEADLESS_INSTRUCTIONS
 
 
 def _format_execute_result(res: dict) -> str:
@@ -300,6 +334,19 @@ def take_screenshot(canvas_only: bool = True) -> list:
 
     Returns a PNG screenshot as an image content block.
     """
+    if _headless:
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    "No screenshot available: this session is running headless "
+                    "(started without a display), so there is no viewer window "
+                    "to capture. Data loading and compute via execute_code/ops "
+                    "still work — tell the user the viewer is unavailable here."
+                ),
+            )
+        ]
+
     host = _kernel_host
     if host is None:
         return [TextContent(type="text", text="Kernel host not initialized")]
@@ -507,6 +554,9 @@ def server_status() -> str:
         lines.append("  state: not initialized")
         return "\n".join(lines)
 
+    lines.append(
+        f"  display: {'headless (no viewer)' if _headless else 'visible'}"
+    )
     health = host.health()
     lines.append(f"  alive: {health['alive']}")
     lines.append(f"  busy: {health['busy']}")
