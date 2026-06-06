@@ -192,6 +192,14 @@ def _wait_until(predicate, timeout=15.0, interval=0.2):
     return predicate()
 
 
+# pgid / killpg / SIGKILL are POSIX-only; the hardening they test degrades to a
+# no-op on Windows (guarded by os.name == "posix" / hasattr(os, "killpg")).
+posix_only = pytest.mark.skipif(
+    os.name != "posix", reason="POSIX-only (pgid / killpg / SIGKILL)"
+)
+
+
+@posix_only
 class TestPgidCapture:
     """Fix 3: pgid captured at launch, reaped via stored pgid."""
 
@@ -234,6 +242,7 @@ class TestPgidCapture:
         assert os.getpgrp() not in killed
 
 
+@posix_only
 class TestWatchdog:
     """Fix 2: liveness watchdog reaps + respawns, bounded."""
 
@@ -325,9 +334,28 @@ class TestParentDeathPipe:
         monkeypatch.delenv(_deathwatch.ENV_FD, raising=False)
         assert _deathwatch.install() is False
 
-    @pytest.mark.skipif(
-        os.name != "posix", reason="parent-death pipe is POSIX-only"
-    )
+    @posix_only
+    def test_deathwatch_self_terminates_on_pipe_eof(self, monkeypatch):
+        # In-process exercise of the watcher: install() on a real pipe, then
+        # close the write end (the launcher "dying"); the watcher thread should
+        # hit EOF and call the group-kill. killpg is stubbed so we record the
+        # call instead of killing the test process.
+        from biopb_mcp.mcp import _deathwatch
+
+        r, w = os.pipe()
+        monkeypatch.setenv(_deathwatch.ENV_FD, str(r))
+        killed = []
+        monkeypatch.setattr(
+            os, "killpg", lambda pg, sig: killed.append((pg, sig))
+        )
+
+        assert _deathwatch.install() is True
+        os.close(w)  # launcher "dies" -> read end sees EOF
+        assert _wait_until(lambda: bool(killed), timeout=5.0, interval=0.05)
+        os.close(r)
+        assert killed[0][1] == signal.SIGKILL
+
+    @posix_only
     def test_kernel_dies_when_launcher_dies(self):
         import subprocess
         import textwrap
