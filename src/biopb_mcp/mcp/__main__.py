@@ -9,16 +9,61 @@ visible napari viewer (requires ``$DISPLAY``).  Run it with::
 Install the optional dependencies first: ``pip install biopb-mcp[mcp]``.
 """
 
+import argparse
 import atexit
 import logging
 import os
 import signal
+import sys
 
 logger = logging.getLogger(__name__)
 
 
-def main():
-    logging.basicConfig(level=logging.INFO)
+def _parse_args(argv, default_transport, default_port):
+    """Parse launcher CLI args (separated out so it is unit-testable)."""
+    parser = argparse.ArgumentParser(
+        prog="biopb-mcp",
+        description="MCP server exposing a napari viewer to an AI agent.",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["http", "stdio"],
+        default=default_transport,
+        help="Front-end transport (default from config; falls back to http).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=default_port,
+        help="Port for the http transport (ignored for stdio).",
+    )
+    return parser.parse_args(argv)
+
+
+def _open_kernel_log(mcp_config):
+    """Open the file the kernel's native stdout/stderr is redirected to in
+    stdio mode (keeps Qt/GL/dask/gRPC output off the JSON-RPC channel).
+
+    Returns an opened file object (append, line-buffered). On failure, falls
+    back to the launcher's stderr so the kernel still starts.
+    """
+    from .._config import get_config_dir
+
+    path = mcp_config.get("kernel_log") or str(get_config_dir() / "kernel.log")
+    try:
+        return open(path, "a", buffering=1)
+    except OSError:
+        logger.warning(
+            "Could not open kernel log %s; routing kernel output to stderr",
+            path,
+        )
+        return sys.stderr
+
+
+def main(argv=None):
+    # Log to stderr always: in stdio mode fd 1 is the JSON-RPC channel and any
+    # stray byte on it corrupts the stream; stderr is harmless in both modes.
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
     from .._config import load_config
     from . import _server
@@ -26,7 +71,13 @@ def main():
 
     config = load_config()
     mcp_config = config.get("mcp", {})
-    port = mcp_config.get("port", 8765)
+    opts = _parse_args(
+        argv,
+        default_transport=mcp_config.get("transport", "http"),
+        default_port=mcp_config.get("port", 8765),
+    )
+    transport = opts.transport
+    port = opts.port
 
     bootstrap_line = "import biopb_mcp.mcp._bootstrap as _b; _b.bootstrap()"
     extra_arguments = [f"--IPKernelApp.exec_lines={bootstrap_line}"]
@@ -61,6 +112,13 @@ def main():
     if mcp_config.get("tensor_cache_local"):
         kernel_env.setdefault("BIOPB_CACHE_LOCAL", "1")
 
+    # In stdio mode the kernel must not inherit the launcher's fd 1 (the
+    # JSON-RPC channel): redirect its native stdout/stderr to a log file. In
+    # http mode it inherits the launcher's fds as before (None).
+    kernel_stdout = kernel_stderr = None
+    if transport == "stdio":
+        kernel_stdout = kernel_stderr = _open_kernel_log(mcp_config)
+
     host = KernelHost(
         extra_arguments=extra_arguments,
         kernel_name=mcp_config.get("kernel_name", "python3"),
@@ -68,6 +126,8 @@ def main():
         execute_timeout=mcp_config.get("execute_timeout", 120.0),
         busy_lock_timeout=mcp_config.get("busy_lock_timeout", 5.0),
         env=kernel_env,
+        kernel_stdout=kernel_stdout,
+        kernel_stderr=kernel_stderr,
     )
     _server.set_kernel_host(host)
     _server.set_promote_after(mcp_config.get("promote_after", 10.0))
@@ -91,11 +151,16 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    _server.run(
-        port,
-        allowed_origins=mcp_config.get("allowed_origins", []),
-        allowed_hosts=mcp_config.get("allowed_hosts", []),
-    )
+    if transport == "stdio":
+        # Client closing stdin (EOF) returns from run_stdio(); the post-run
+        # shutdown below then reaps the kernel. No port / Origin allowlist.
+        _server.run_stdio()
+    else:
+        _server.run(
+            port,
+            allowed_origins=mcp_config.get("allowed_origins", []),
+            allowed_hosts=mcp_config.get("allowed_hosts", []),
+        )
 
     # If the server loop returns on its own, exit the same way: shut down the
     # kernel and bypass Py_FinalizeEx (atexit handlers do not run after

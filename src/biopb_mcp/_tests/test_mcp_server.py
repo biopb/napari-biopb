@@ -405,3 +405,25 @@ class TestTransportSecurity:
         # ...without dropping the loopback defaults.
         assert "http://127.0.0.1:*" in ts.allowed_origins
         assert "127.0.0.1:*" in ts.allowed_hosts
+
+
+# -----------------------------------------------------------------------
+# Transport dispatch
+# -----------------------------------------------------------------------
+
+
+class TestRunStdio:
+    def test_run_stdio_uses_stdio_transport(self, monkeypatch):
+        calls = {}
+        monkeypatch.setattr(_server.mcp, "run", lambda **kw: calls.update(kw))
+        _server.run_stdio()
+        assert calls == {"transport": "stdio"}
+
+    def test_run_http_uses_streamable_http(self, monkeypatch):
+        calls = {}
+        monkeypatch.setattr(_server.mcp, "run", lambda **kw: calls.update(kw))
+        _server.run(port=9999)
+        assert calls == {"transport": "streamable-http"}
+        # http binds loopback on the requested port.
+        assert _server.mcp.settings.host == "127.0.0.1"
+        assert _server.mcp.settings.port == 9999

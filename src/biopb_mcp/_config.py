@@ -51,7 +51,17 @@ DEFAULT_CONFIG = {
         "error_threshold_mb": 2000,  # Raise MemoryError if chunk > 2GB
     },
     "mcp": {
+        # Front-end transport: "http" (loopback streamable-http on `port`, the
+        # default) or "stdio" (JSON-RPC on stdin/stdout, for a client that
+        # spawns biopb-mcp as a subprocess). The kernel/viewer/dask stack is
+        # identical either way. Overridable per-launch with `--transport`.
+        "transport": "http",
         "port": 8765,
+        # Where the child kernel's *native* (C-level) stdout/stderr is written
+        # in stdio mode, so it never corrupts the JSON-RPC stream on fd 1.
+        # Empty -> ~/.config/biopb-mcp/kernel.log. Ignored in http mode (the
+        # kernel inherits the launcher's fds, which are not a protocol channel).
+        "kernel_log": "",
         # Dask defaults to a kernel-local multi-process distributed cluster
         # (LocalCluster). This is the only configuration where cancel_job can
         # stop an in-flight .compute() mid-execution, and it gives real
@@ -95,7 +105,8 @@ DEFAULT_CONFIG = {
         # Extra Host/Origin header values appended to the loopback allowlist
         # that guards the server against DNS-rebinding / cross-origin browser
         # requests. Set these only when fronting the server with a reverse
-        # proxy that needs its own Host/Origin permitted.
+        # proxy that needs its own Host/Origin permitted. http transport only;
+        # ignored in stdio mode (no network surface).
         "allowed_origins": [],
         "allowed_hosts": [],
         # biopb.image ProcessImage servicer URLs (grpc:// or grpcs://).

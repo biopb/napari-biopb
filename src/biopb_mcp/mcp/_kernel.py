@@ -58,6 +58,8 @@ class KernelHost:
         health_probe_expect: str = "True",
         cwd: Optional[str] = None,
         env: Optional[dict] = None,
+        kernel_stdout=None,
+        kernel_stderr=None,
     ):
         import threading
 
@@ -70,6 +72,12 @@ class KernelHost:
         self._health_probe_expect = health_probe_expect
         self._cwd = cwd
         self._env = env
+        # Where the kernel subprocess' native stdout/stderr fds go. None ->
+        # inherit the launcher's fds (http mode). In stdio mode the launcher
+        # passes a log file so native kernel output (Qt/GL/dask/gRPC) never
+        # lands on fd 1, which there *is* the JSON-RPC protocol channel.
+        self._kernel_stdout = kernel_stdout
+        self._kernel_stderr = kernel_stderr
         self._km = None
         self._kc = None
         self._lock = threading.RLock()
@@ -85,6 +93,13 @@ class KernelHost:
         from jupyter_client import KernelManager
 
         self._km = KernelManager(kernel_name=self._kernel_name)
+        # stdout/stderr flow through the provisioner to the kernel's Popen;
+        # None means inherit (the jupyter_client default).
+        fd_kwargs = {}
+        if self._kernel_stdout is not None:
+            fd_kwargs["stdout"] = self._kernel_stdout
+        if self._kernel_stderr is not None:
+            fd_kwargs["stderr"] = self._kernel_stderr
         self._km.start_kernel(
             extra_arguments=list(self._extra_arguments),
             env=self._env if self._env is not None else os.environ.copy(),
@@ -92,6 +107,7 @@ class KernelHost:
             # Own process group so a hard restart can group-kill any dask
             # child processes the kernel spawned.
             start_new_session=True,
+            **fd_kwargs,
         )
         self._kc = self._km.client()
         self._kc.start_channels()
