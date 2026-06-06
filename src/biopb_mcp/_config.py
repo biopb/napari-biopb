@@ -51,11 +51,11 @@ DEFAULT_CONFIG = {
         "error_threshold_mb": 2000,  # Raise MemoryError if chunk > 2GB
     },
     "mcp": {
-        # Front-end transport: "http" (loopback streamable-http on `port`, the
-        # default) or "stdio" (JSON-RPC on stdin/stdout, for a client that
-        # spawns biopb-mcp as a subprocess). The kernel/viewer/dask stack is
+        # Front-end transport: "stdio" (JSON-RPC on stdin/stdout, for a client
+        # that spawns biopb-mcp as a subprocess, the default) or "http"
+        # (loopback streamable-http on `port`). The kernel/viewer/dask stack is
         # identical either way. Overridable per-launch with `--transport`.
-        "transport": "http",
+        "transport": "stdio",
         "port": 8765,
         # Where the child kernel's *native* (C-level) stdout/stderr is written
         # in stdio mode, so it never corrupts the JSON-RPC stream on fd 1.

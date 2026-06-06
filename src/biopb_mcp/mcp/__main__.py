@@ -29,7 +29,7 @@ def _parse_args(argv, default_transport, default_port):
         "--transport",
         choices=["http", "stdio"],
         default=default_transport,
-        help="Front-end transport (default from config; falls back to http).",
+        help="Front-end transport (default from config; falls back to stdio).",
     )
     parser.add_argument(
         "--port",
@@ -73,7 +73,7 @@ def main(argv=None):
     mcp_config = config.get("mcp", {})
     opts = _parse_args(
         argv,
-        default_transport=mcp_config.get("transport", "http"),
+        default_transport=mcp_config.get("transport", "stdio"),
         default_port=mcp_config.get("port", 8765),
     )
     transport = opts.transport
