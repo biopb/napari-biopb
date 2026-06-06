@@ -217,14 +217,20 @@ def set_promote_after(seconds: float):
 
 
 def set_headless(headless: bool):
-    """Mark the session compute-only (no viewer) and, when so, advertise it to
-    the agent via the initialize ``instructions`` field."""
+    """Mark the session compute-only (no viewer) and advertise it to the agent
+    via the initialize ``instructions`` field.
+
+    Owns that field in both directions (idempotent): set the headless directive
+    when headless, clear it otherwise, so a flip back to visible can't leave a
+    stale HEADLESS directive in the handshake. The low-level Server holds the
+    `instructions` returned in the handshake; FastMCP built it at import with
+    None, so set it here.
+    """
     global _headless
     _headless = bool(headless)
-    if _headless:
-        # The low-level Server holds the `instructions` returned in the
-        # handshake; FastMCP built it at import with None, so set it here.
-        mcp._mcp_server.instructions = _HEADLESS_INSTRUCTIONS
+    mcp._mcp_server.instructions = (
+        _HEADLESS_INSTRUCTIONS if _headless else None
+    )
 
 
 def _format_execute_result(res: dict) -> str:

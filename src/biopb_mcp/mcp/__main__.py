@@ -67,24 +67,52 @@ def _resolve_headless(display_mode, has_display):
     return not has_display
 
 
+def _config_defaults(mcp_config):
+    """Validate/coerce the config-derived launcher defaults.
+
+    argparse only type-checks and constrains *CLI-provided* values, not
+    ``default=`` values — so a malformed config (a bad ``transport`` string, a
+    stringified ``port``) would otherwise flow straight through. Return a clean
+    ``(transport, port)`` falling back to the documented defaults.
+    """
+    transport = mcp_config.get("transport", "stdio")
+    if transport not in ("http", "stdio"):
+        logger.warning("Unknown mcp.transport %r; using stdio", transport)
+        transport = "stdio"
+    try:
+        port = int(mcp_config.get("port", 8765))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid mcp.port %r; using 8765", mcp_config.get("port")
+        )
+        port = 8765
+    return transport, port
+
+
 def _open_kernel_log(mcp_config):
     """Open the file the kernel's native stdout/stderr is redirected to in
     stdio mode (keeps Qt/GL/dask/gRPC output off the JSON-RPC channel).
 
-    Returns an opened file object (append, line-buffered). On failure, falls
-    back to the launcher's stderr so the kernel still starts.
+    Opened binary, append, unbuffered: the handle's fd is the subprocess'
+    native stdout/stderr, which emits arbitrary bytes (Qt/GL/dask/gRPC), so a
+    byte sink avoids any text-layer translation and matches how KernelHost is
+    exercised. On failure, falls back to the launcher's stderr buffer so the
+    kernel still starts.
     """
     from .._config import get_config_dir
 
     path = mcp_config.get("kernel_log") or str(get_config_dir() / "kernel.log")
     try:
-        return open(path, "a", buffering=1)
+        return open(path, "ab", buffering=0)
     except OSError:
         logger.warning(
             "Could not open kernel log %s; routing kernel output to stderr",
             path,
         )
-        return sys.stderr
+        # Native fd redirection needs a byte sink; sys.stderr is a text wrapper,
+        # so hand back its binary buffer when present (absent under some test
+        # capture shims, where the text stream itself is the safe fallback).
+        return getattr(sys.stderr, "buffer", sys.stderr)
 
 
 def main(argv=None):
@@ -98,10 +126,11 @@ def main(argv=None):
 
     config = load_config()
     mcp_config = config.get("mcp", {})
+    default_transport, default_port = _config_defaults(mcp_config)
     opts = _parse_args(
         argv,
-        default_transport=mcp_config.get("transport", "stdio"),
-        default_port=mcp_config.get("port", 8765),
+        default_transport=default_transport,
+        default_port=default_port,
     )
     transport = opts.transport
     port = opts.port

@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from biopb_mcp.mcp.__main__ import (
+    _config_defaults,
     _has_display,
     _open_kernel_log,
     _parse_args,
@@ -47,16 +48,39 @@ class TestParseArgs:
             )
 
 
+class TestConfigDefaults:
+    def test_clean_config_passes_through(self):
+        assert _config_defaults({"transport": "http", "port": 9000}) == (
+            "http",
+            9000,
+        )
+
+    def test_unknown_transport_falls_back_to_stdio(self):
+        transport, _ = _config_defaults({"transport": "ftp"})
+        assert transport == "stdio"
+
+    def test_stringified_port_is_coerced_to_int(self):
+        _, port = _config_defaults({"port": "8765"})
+        assert port == 8765
+
+    def test_garbage_port_falls_back(self):
+        _, port = _config_defaults({"port": "not-a-number"})
+        assert port == 8765
+
+    def test_empty_config_uses_documented_defaults(self):
+        assert _config_defaults({}) == ("stdio", 8765)
+
+
 class TestOpenKernelLog:
     def test_uses_configured_path(self, tmp_path):
         path = tmp_path / "k.log"
         f = _open_kernel_log({"kernel_log": str(path)})
         try:
-            f.write("hello\n")
+            f.write(b"hello\n")
             f.flush()
         finally:
             f.close()
-        assert path.read_text() == "hello\n"
+        assert path.read_bytes() == b"hello\n"
 
     def test_empty_path_defaults_under_config_dir(self, tmp_path, monkeypatch):
         # _open_kernel_log does `from .._config import get_config_dir` at call
@@ -72,11 +96,12 @@ class TestOpenKernelLog:
             f.close()
 
     def test_falls_back_to_stderr_on_open_error(self):
-        # An unwritable path must not crash the launcher; it degrades to stderr.
+        # An unwritable path must not crash the launcher; it degrades to the
+        # stderr byte sink (sys.stderr.buffer when present, else sys.stderr).
         f = _open_kernel_log(
             {"kernel_log": "/nonexistent_dir/deep/path/kernel.log"}
         )
-        assert f is sys.stderr
+        assert f is getattr(sys.stderr, "buffer", sys.stderr)
 
 
 class TestHasDisplay:

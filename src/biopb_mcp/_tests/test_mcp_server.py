@@ -175,8 +175,11 @@ class TestSetHeadless:
         # The directive is conditioned on the user reaching for the viewer.
         assert "viewer" in instr.lower()
 
-    def test_visible_does_not_set_instructions(self):
-        _server.mcp._mcp_server.instructions = None
+    def test_visible_clears_stale_instructions(self):
+        # A flip headless -> visible must not leave the HEADLESS directive in
+        # the handshake (set_headless owns the field in both directions).
+        _server.set_headless(True)
+        assert _server.mcp._mcp_server.instructions is not None
         _server.set_headless(False)
         assert _server._headless is False
         assert _server.mcp._mcp_server.instructions is None
