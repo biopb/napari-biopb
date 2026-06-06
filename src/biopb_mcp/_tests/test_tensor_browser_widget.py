@@ -112,7 +112,9 @@ class TestConnectPoller:
         conn.server_start_timeout.return_value = 30.0
         conn.launch_local_server.side_effect = RuntimeError("port in use")
 
-        w._maybe_offer_start_server()
+        # Launch failure is unexpected -> inline message + propagate to napari.
+        with pytest.raises(RuntimeError, match="port in use"):
+            w._maybe_offer_start_server()
 
         assert "Failed to start local biopb server" in w._error_label.text()
         # No poll started when the launch itself failed.
@@ -178,9 +180,13 @@ class TestConnectPoller:
         conn.connect.side_effect = RuntimeError("connection refused")
         w._connect_boot_deadline = time.monotonic() - 1  # already elapsed
 
-        w._connect_tick(w._connect_gen)
+        # A server we launched ourselves never coming up is unexpected -> the
+        # cause is surfaced inline and re-raised for napari's notifications.
+        with pytest.raises(RuntimeError, match="connection refused"):
+            w._connect_tick(w._connect_gen)
 
         assert "did not become ready" in w._error_label.text()
+        assert "connection refused" in w._error_label.text()
         assert w._connect_boot_deadline is None
         assert not w._refresh_button.isEnabled()
 

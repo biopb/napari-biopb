@@ -533,12 +533,12 @@ class TensorBrowserWidget(QWidget):
         try:
             self._conn.launch_local_server(startup_timeout=timeout)
         except Exception as exc:
-            logger.exception("Failed to start local biopb server")
-            # Surface the underlying cause (e.g. port already in use) instead of
-            # a generic message — the root cause is otherwise only visible in
-            # the server logs. See docs/troubleshooting.md for remedies.
+            # Launching a server we were asked to start failing is unexpected:
+            # show the underlying cause (e.g. port already in use) inline and
+            # also let it propagate to napari's notification_manager. See
+            # docs/troubleshooting.md for remedies.
             self._show_error(f"Failed to start local biopb server: {exc}")
-            return
+            raise
 
         self._server_input.setText(self._conn.url)
         self._connect_url = self._conn.url
@@ -631,7 +631,7 @@ class TensorBrowserWidget(QWidget):
             self._show_status(self._conn.last_message)
             self._rearm(gen)
             return
-        except Exception:
+        except Exception as exc:
             # Connection failed. While waiting on a server we just launched,
             # tolerate this (the daemon may not have bound its port yet) until
             # the boot deadline, then give up. Otherwise fail fast.
@@ -640,21 +640,25 @@ class TensorBrowserWidget(QWidget):
                     self._show_status("Starting local biopb server…")
                     self._rearm(gen)
                     return
+                # Boot timed out: this is unexpected (we launched it
+                # ourselves), so surface the underlying cause and let napari's
+                # notification_manager show it.
                 self._connect_boot_deadline = None
                 self._clear_status()
                 self._show_error(
-                    "Local biopb server did not become ready in time; "
-                    "see the console and server logs."
+                    f"Local biopb server did not become ready in time: {exc}"
                 )
                 self._tree_widget.clear()
                 self._refresh_button.setEnabled(False)
-                return
+                raise
+            # An ordinary unreachable server is an expected condition, not an
+            # error to surface to napari: show a friendly inline hint instead.
             self._clear_status()
             self._show_error(
                 f"Cannot reach tensor server at {self._connect_url} — "
                 "is it running?"
             )
-            logger.exception("Failed to connect to TensorFlight server")
+            logger.info("Tensor server unreachable at %s", self._connect_url)
             self._tree_widget.clear()
             self._refresh_button.setEnabled(False)
             if self._offer_autostart_on_fail:

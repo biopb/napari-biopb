@@ -70,10 +70,10 @@ def _starting_message(health) -> str:
     if isinstance(health, dict):
         bits = []
         count = health.get("source_count")
-        if count:
+        if count is not None:
             bits.append(f"{count} sources registered so far")
         uptime = health.get("uptime_seconds")
-        if uptime:
+        if uptime is not None:
             bits.append(f"up {int(uptime)}s")
         if bits:
             msg += " (" + ", ".join(bits) + ")"
@@ -200,6 +200,7 @@ class TensorConnection:
             self.sources = {}
             self.use_server_query = False
             self.last_status = "error"
+            self.last_message = ""
             raise
 
     def refresh(self) -> Dict[str, DataSourceDescriptor]:

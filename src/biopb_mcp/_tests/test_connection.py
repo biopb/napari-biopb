@@ -220,10 +220,22 @@ class TestConnectReadiness:
         )
 
         conn = TensorConnection(config={})
+        # A stale STARTING message from a prior attempt must not linger.
+        conn.last_status = "starting"
+        conn.last_message = "scanning…"
         with pytest.raises(RuntimeError, match="unavailable"):
             conn.connect("grpc://host:9")
         assert conn.is_connected is False
         assert conn.last_status == "error"
+        assert conn.last_message == ""
+
+    def test_starting_message_includes_zero_counts(self):
+        # source_count=0 is meaningful (just started) and must not be dropped.
+        msg = _connection._starting_message(
+            {"status": "STARTING", "source_count": 0, "uptime_seconds": 0}
+        )
+        assert "0 sources registered so far" in msg
+        assert "up 0s" in msg
 
 
 class TestConnectWhenBooted:
