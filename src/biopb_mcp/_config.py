@@ -92,6 +92,27 @@ DEFAULT_CONFIG = {
         "dask_dashboard_address": "127.0.0.1:0",
         "kernel_name": "python3",
         "kernel_startup_timeout": 60.0,
+        # Give-up budget (seconds) for start_local_server's just-launched boot
+        # wait, where connection-refused is tolerated while the server binds and
+        # scans its data folder. The normal auto-connect path has no timeout: it
+        # fails fast on a down server and polls a STARTING (scanning) server
+        # indefinitely with progress feedback (issue #12).
+        "server_start_timeout": 60.0,
+        # Orphan hardening (issue #13). The kernel runs in its own session, so
+        # an abnormal launcher/kernel death would otherwise orphan the kernel +
+        # its dask LocalCluster.
+        #   parent_death_pipe: kernel inherits a pipe read-end and group-kills
+        #     itself when the launcher *process* dies (POSIX only; mode 1).
+        #   watchdog_interval: seconds between liveness polls; on an unexpected
+        #     kernel death the host reaps the orphaned dask group and respawns
+        #     (0 disables the watchdog; mode 2).
+        #   watchdog_max_respawns / watchdog_respawn_window: bound respawns to
+        #     avoid a crash-respawn thrash loop; once exceeded the host is
+        #     marked dead until restart_kernel.
+        "parent_death_pipe": True,
+        "watchdog_interval": 5.0,
+        "watchdog_max_respawns": 3,
+        "watchdog_respawn_window": 60.0,
         # execute_timeout now bounds only the *quick* in-band kernel snippets
         # (screenshot / status / inspect / job submit+poll), not long jobs:
         # execute_code runs agent code in a background thread that may run
