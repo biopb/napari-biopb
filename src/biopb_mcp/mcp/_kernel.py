@@ -120,6 +120,14 @@ class KernelHost:
         # WSL, unreliable within the client's startup timeout); tool calls wait
         # on this rather than racing a half-built kernel. Cleared on teardown.
         self._ready = threading.Event()
+        # The reason the last bring-up failed terminally (str), or None. Because
+        # start() runs on a background thread and only logs its raise, a failed
+        # bootstrap (missing Qt/OpenGL, a health probe that never passes) would
+        # otherwise be indistinguishable from a still-in-progress startup — both
+        # leave _ready unset. Set under the lock by start()/restart()/respawn on
+        # failure and cleared on a successful bring-up; execute() and health()
+        # read it to surface a terminal error instead of an endless "starting".
+        self._start_error = None
 
         # -- orphan hardening (issue #13) -------------------------------
         # pgid captured at launch so the group-kill never re-derives it from a
@@ -144,10 +152,33 @@ class KernelHost:
     # -- lifecycle ------------------------------------------------------
 
     def start(self):
-        """Launch the kernel, wait until ready, then run the health probe."""
-        self._launch()
-        self._run_health_probe()
-        self._start_watchdog()
+        """Launch the kernel, wait until ready, then run the health probe.
+
+        Holds the lifecycle lock for the whole bring-up. The launcher runs
+        start() on a background thread (so the MCP handshake is served before
+        the slow kernel/viewer bring-up finishes), which means a client can call
+        restart_kernel — i.e. restart() — while this is still in _launch() /
+        _run_health_probe(). restart()/shutdown() take the same lock, so taking
+        it here serializes those against the initial start: without it both
+        paths mutate the shared _km/_kc/_pgid state concurrently and can leave
+        the host attached to the wrong kernel or leak an orphaned kernel
+        process. The lock is reentrant, so the health probe's internal
+        execute() re-enters on this thread without deadlocking.
+        """
+        with self._lock:
+            try:
+                self._launch()
+                self._run_health_probe()
+            except Exception as exc:
+                # Record *why* so a tool call reports a terminal startup error
+                # rather than waiting out the startup budget and reporting
+                # "starting" forever (the launcher's background thread only logs
+                # this raise). _run_health_probe folds the in-kernel bootstrap
+                # traceback into its message, so the reason flows through.
+                self._start_error = str(exc) or repr(exc)
+                raise
+            self._start_error = None
+            self._start_watchdog()
 
     def _launch(self):
         from jupyter_client import KernelManager
@@ -273,20 +304,39 @@ class KernelHost:
         The kernel boots off-thread (so the launcher can serve the MCP handshake
         immediately), so a tool call may land before the kernel is ready. Rather
         than error on a half-built kernel, wait on the readiness signal up to
-        the startup budget and report ``starting`` if it never arrives.
+        the startup budget. If the bring-up failed terminally (``_start_error``
+        set), report that error immediately; if it is merely still in progress,
+        report ``starting``.
         """
-        if not self._ready.is_set() and not self._ready.wait(
-            self._startup_timeout
-        ):
-            return {
-                "stdout": "",
-                "result_text": "",
-                "error_text": (
-                    "Kernel is still starting (napari viewer / dask bring-up). "
-                    "Retry in a few seconds."
-                ),
-                "status": "starting",
-            }
+        if not self._ready.is_set():
+            # Only wait if the bring-up hasn't already failed: a recorded
+            # _start_error means readiness will never arrive, so don't burn the
+            # startup budget blocking on it.
+            if self._start_error is None:
+                self._ready.wait(self._startup_timeout)
+            if not self._ready.is_set():
+                err = self._start_error
+                if err is not None:
+                    return {
+                        "stdout": "",
+                        "result_text": "",
+                        "error_text": (
+                            "Kernel startup failed: "
+                            + err
+                            + " The kernel is not running; call restart_kernel "
+                            "to retry."
+                        ),
+                        "status": "error",
+                    }
+                return {
+                    "stdout": "",
+                    "result_text": "",
+                    "error_text": (
+                        "Kernel is still starting (napari viewer / dask "
+                        "bring-up). Retry in a few seconds."
+                    ),
+                    "status": "starting",
+                }
         return self._execute_internal(code, timeout)
 
     def _execute_internal(
@@ -404,9 +454,14 @@ class KernelHost:
                     )
 
                 self._shutdown_current()
-                self._launch()
-                self._run_health_probe()
+                try:
+                    self._launch()
+                    self._run_health_probe()
+                except Exception as exc:
+                    self._start_error = str(exc) or repr(exc)
+                    raise
                 # A manual restart clears the dead state and respawn budget.
+                self._start_error = None
                 self._dead = False
                 self._respawn_times.clear()
             finally:
@@ -549,9 +604,11 @@ class KernelHost:
         try:
             self._launch()
             self._run_health_probe()
+            self._start_error = None
             logger.info("Kernel respawned after unexpected death.")
-        except Exception:
+        except Exception as exc:
             logger.exception("Respawn after unexpected death failed.")
+            self._start_error = str(exc) or repr(exc)
             self._dead = True
             self._watchdog_stop.set()
 
@@ -562,6 +619,7 @@ class KernelHost:
         return {
             "alive": self.is_alive(),
             "ready": self._ready.is_set(),
+            "start_error": self._start_error,
             "busy": self.is_busy(),
             "dead": self._dead,
             "recent_respawns": len(self._respawn_times),

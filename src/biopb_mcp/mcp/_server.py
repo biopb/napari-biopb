@@ -575,12 +575,19 @@ def server_status() -> str:
             "  state: DEAD — respawn budget exhausted; call restart_kernel"
         )
 
-    # Don't query the kernel while it is still booting — execute() would block
-    # on readiness for the whole startup budget. Report the state and return.
+    # Don't query the kernel while it is not ready — execute() would block on
+    # readiness for the whole startup budget. A recorded start_error means the
+    # bring-up failed terminally (vs. still in progress); report it as failed,
+    # not "starting", so a broken bootstrap is distinguishable from slow boot.
     if not health["ready"]:
-        lines.append(
-            "  state: starting — kernel/viewer still booting; retry shortly"
-        )
+        if health.get("start_error"):
+            lines.append("  state: failed — kernel startup error:")
+            lines.append(f"    {health['start_error']}")
+            lines.append("  (call restart_kernel to retry)")
+        else:
+            lines.append(
+                "  state: starting — kernel/viewer still booting; retry shortly"
+            )
         return "\n".join(lines)
 
     res = host.execute(_STATUS_SNIPPET, timeout=15.0)

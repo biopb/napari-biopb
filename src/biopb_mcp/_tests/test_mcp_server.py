@@ -69,6 +69,7 @@ def mock_kernel_host():
     host.health.return_value = {
         "alive": True,
         "ready": True,
+        "start_error": None,
         "busy": False,
         "dead": False,
         "recent_respawns": 0,
@@ -424,6 +425,7 @@ class TestServerStatus:
         server_with_host.health.return_value = {
             "alive": True,
             "ready": False,
+            "start_error": None,
             "busy": False,
             "dead": False,
             "recent_respawns": 0,
@@ -432,6 +434,26 @@ class TestServerStatus:
         result = _server.server_status()
         assert "ready: False" in result
         assert "starting" in result.lower()
+        server_with_host.execute.assert_not_called()
+
+    def test_failed_startup_reports_error_not_starting(self, server_with_host):
+        # A terminal bootstrap failure (start_error recorded) must read as
+        # "failed" with the reason — not the generic "starting" that a slow but
+        # progressing bring-up shows — so the two are distinguishable.
+        server_with_host.health.return_value = {
+            "alive": False,
+            "ready": False,
+            "start_error": "viewer absent: ImportError: no Qt platform",
+            "busy": False,
+            "dead": False,
+            "recent_respawns": 0,
+            "watchdog_running": False,
+        }
+        result = _server.server_status()
+        assert "failed" in result.lower()
+        assert "no Qt platform" in result
+        assert "restart_kernel" in result
+        assert "starting" not in result.lower()
         server_with_host.execute.assert_not_called()
 
 

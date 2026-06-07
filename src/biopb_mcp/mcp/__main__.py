@@ -255,8 +255,9 @@ def main(argv=None):
             logger.info("Kernel ready.")
         except Exception:
             logger.exception(
-                "Kernel startup failed; tools will report the kernel as still "
-                "starting. See the kernel log for the bootstrap traceback."
+                "Kernel startup failed; tools will report a terminal startup "
+                "error (call restart_kernel to retry). See the kernel log for "
+                "the bootstrap traceback."
             )
 
     threading.Thread(
