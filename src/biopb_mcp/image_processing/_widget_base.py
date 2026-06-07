@@ -342,7 +342,8 @@ class _WidgetBase(Container):
         """Save current widget settings to config file.
 
         Reloads from disk first so keys this widget does not own (e.g.
-        mcp.process_image_servers) are not clobbered by a stale snapshot.
+        mcp.services.process_image_servers) are not clobbered by a stale
+        snapshot.
         """
         settings = self._snapshot()
         config = load_config()

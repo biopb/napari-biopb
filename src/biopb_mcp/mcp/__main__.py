@@ -2,7 +2,7 @@
 
 This process *is* the MCP server: it owns a child Jupyter kernel that hosts a
 visible napari viewer when a display is available, or a compute-only headless
-kernel when none is (see ``mcp.display_mode``).  Run it with::
+kernel when none is (see ``mcp.transport.display_mode``).  Run it with::
 
     biopb-mcp        # console script
     python -m biopb_mcp.mcp
@@ -56,7 +56,7 @@ def _has_display():
 
 
 def _resolve_headless(display_mode, has_display):
-    """Map ``mcp.display_mode`` + display availability to a headless bool.
+    """Map ``mcp.transport.display_mode`` + display availability to headless.
 
     ``"headless"`` -> always; ``"visible"`` -> never (the caller fails fast if
     no display); ``"auto"`` / anything else -> headless only when no display.
@@ -153,7 +153,8 @@ def main(argv=None):
         logger.error(
             "display_mode='visible' but no display detected "
             "($DISPLAY/$WAYLAND_DISPLAY are unset). Start an X/Wayland session, "
-            "or set mcp.display_mode to 'auto' or 'headless'. (Kernel output: %s)",
+            "or set mcp.transport.display_mode to 'auto' or 'headless'. "
+            "(Kernel output: %s)",
             kernel_log_path,
         )
         return 2

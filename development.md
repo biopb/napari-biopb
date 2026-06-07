@@ -124,8 +124,8 @@ protocol channel, so the launcher logs to stderr and redirects the kernel's
 (`config['mcp']['transport']['kernel_log']`, default
 `~/.config/biopb-mcp/kernel.log`) — otherwise Qt/GL/dask/gRPC C-level writes
 would corrupt the stream. stdio has no network surface, so the Host/Origin
-allowlist (`transport.allowed_origins`/`allowed_hosts`) is http-only and not
-applied. NB:
+allowlist (`transport.allowed_origins`/`transport.allowed_hosts`) is http-only
+and not applied. NB:
 the orphaned-kernel risks (issue #13) are amplified under stdio (one kernel tree
 per client launch); the `PR_SET_PDEATHSIG`/watchdog hardening there is a
 prerequisite before recommending stdio for production.
@@ -202,8 +202,8 @@ allowlist** (loopback only, set explicitly in `_server.py` via
 `build_transport_security()`), so a malicious page in the user's browser is
 rejected (`403`/`421`) before it can reach the kernel. The allowlist is
 extensible via `config['mcp']['transport']['allowed_origins']` /
-`['allowed_hosts']` for a reverse-proxy front; there is no loopback token (the
-`Origin` check already
+`config['mcp']['transport']['allowed_hosts']` for a reverse-proxy front; there
+is no loopback token (the `Origin` check already
 blocks the browser-attacker threat). Do not describe this as sandboxed.
 
 **Error-propagation model (general — applies beyond startup).** Letting an
