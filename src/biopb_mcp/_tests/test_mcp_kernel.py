@@ -437,6 +437,19 @@ class TestReadiness:
             host.shutdown()
         assert host.health()["ready"] is False
 
+    def test_readiness_wait_bounded_by_caller_timeout(self):
+        # A tool call during bring-up must not block for the whole (large)
+        # startup budget before its own timeout begins: the readiness wait is
+        # capped at the caller's timeout, so a short-timeout call reports
+        # "starting" promptly.
+        host = KernelHost(startup_timeout=60.0, parent_death_pipe=False)
+        t0 = time.monotonic()
+        res = host.execute("print('hi')", timeout=0.3)
+        elapsed = time.monotonic() - t0
+        assert res["status"] == "starting"
+        # Well under the 60s startup budget — it honored the 0.3s timeout.
+        assert elapsed < 5.0
+
 
 class TestStartRestartSerialization:
     """The launcher runs start() on a background thread, so a restart_kernel

@@ -436,6 +436,29 @@ class TestServerStatus:
         assert "starting" in result.lower()
         server_with_host.execute.assert_not_called()
 
+    def test_dead_kernel_reports_only_dead_not_starting(
+        self, server_with_host
+    ):
+        # When the watchdog marks the host dead, ready is also false. Report a
+        # single DEAD state and return — not DEAD *and* a contradictory
+        # "starting"/"failed" line.
+        server_with_host.health.return_value = {
+            "alive": False,
+            "ready": False,
+            "start_error": "respawn after unexpected death failed",
+            "busy": False,
+            "dead": True,
+            "recent_respawns": 3,
+            "watchdog_running": False,
+        }
+        result = _server.server_status()
+        assert "DEAD" in result
+        assert "starting" not in result.lower()
+        assert "state: failed" not in result
+        # The recorded reason rides along under DEAD (not as a second state).
+        assert "respawn after unexpected death failed" in result
+        server_with_host.execute.assert_not_called()
+
     def test_failed_startup_reports_error_not_starting(self, server_with_host):
         # A terminal bootstrap failure (start_error recorded) must read as
         # "failed" with the reason — not the generic "starting" that a slow but

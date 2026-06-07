@@ -299,21 +299,28 @@ class KernelHost:
         execution exceeded *timeout* and was interrupted), ``busy`` (the kernel
         lock could not be acquired within ``busy_lock_timeout``), or
         ``starting`` (the kernel was still booting and did not become ready
-        within ``startup_timeout``).
+        within the readiness wait below).
 
         The kernel boots off-thread (so the launcher can serve the MCP handshake
         immediately), so a tool call may land before the kernel is ready. Rather
-        than error on a half-built kernel, wait on the readiness signal up to
-        the startup budget. If the bring-up failed terminally (``_start_error``
-        set), report that error immediately; if it is merely still in progress,
-        report ``starting``.
+        than error on a half-built kernel, wait on the readiness signal — but
+        only up to the caller's *timeout* (the startup budget when *timeout* is
+        None), so a call during bring-up does not block far past what the caller
+        asked for before its execution timeout would even begin. If the bring-up
+        failed terminally (``_start_error`` set), report that error immediately;
+        if it is merely still in progress, report ``starting``.
         """
         if not self._ready.is_set():
             # Only wait if the bring-up hasn't already failed: a recorded
-            # _start_error means readiness will never arrive, so don't burn the
-            # startup budget blocking on it.
+            # _start_error means readiness will never arrive, so don't block on
+            # it. Bound the wait by the caller's timeout (startup budget when
+            # None) so execute() can't block ~startup_timeout *before* the
+            # execution timeout starts.
             if self._start_error is None:
-                self._ready.wait(self._startup_timeout)
+                ready_wait = (
+                    self._startup_timeout if timeout is None else timeout
+                )
+                self._ready.wait(ready_wait)
             if not self._ready.is_set():
                 err = self._start_error
                 if err is not None:

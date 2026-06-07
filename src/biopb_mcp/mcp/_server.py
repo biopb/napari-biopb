@@ -570,16 +570,23 @@ def server_status() -> str:
     lines.append(f"  watchdog_running: {health['watchdog_running']}")
     if health["recent_respawns"]:
         lines.append(f"  recent_respawns: {health['recent_respawns']}")
+
+    # Kernel-state summary: dead / failed / starting are mutually exclusive
+    # (when dead or failed, ready is also false), so report exactly one and
+    # return — don't fall through and print a second, contradictory state. Each
+    # also skips the kernel query below, which would block on readiness for the
+    # whole startup budget.
     if health["dead"]:
         lines.append(
             "  state: DEAD — respawn budget exhausted; call restart_kernel"
         )
-
-    # Don't query the kernel while it is not ready — execute() would block on
-    # readiness for the whole startup budget. A recorded start_error means the
-    # bring-up failed terminally (vs. still in progress); report it as failed,
-    # not "starting", so a broken bootstrap is distinguishable from slow boot.
+        if health.get("start_error"):
+            lines.append(f"    last error: {health['start_error']}")
+        return "\n".join(lines)
     if not health["ready"]:
+        # A recorded start_error means the bring-up failed terminally (vs. still
+        # in progress); report it as failed, not "starting", so a broken
+        # bootstrap is distinguishable from a slow boot.
         if health.get("start_error"):
             lines.append("  state: failed — kernel startup error:")
             lines.append(f"    {health['start_error']}")
