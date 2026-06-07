@@ -114,6 +114,12 @@ class KernelHost:
         self._km = None
         self._kc = None
         self._lock = threading.RLock()
+        # Set once the kernel has launched AND its bootstrap health probe has
+        # passed. The launcher starts the kernel off-thread so the MCP handshake
+        # is served immediately (kernel + Qt viewer bring-up is slow and, on
+        # WSL, unreliable within the client's startup timeout); tool calls wait
+        # on this rather than racing a half-built kernel. Cleared on teardown.
+        self._ready = threading.Event()
 
         # -- orphan hardening (issue #13) -------------------------------
         # pgid captured at launch so the group-kill never re-derives it from a
@@ -216,8 +222,11 @@ class KernelHost:
 
     def _run_health_probe(self):
         if not self._health_probe_code:
+            self._ready.set()
             return
-        res = self.execute(
+        # Use the internal executor: the public execute() waits on _ready, which
+        # this probe is what *sets* — waiting on ourselves would deadlock.
+        res = self._execute_internal(
             self._health_probe_code, timeout=self._startup_timeout
         )
         haystack = res.get("stdout", "") + res.get("result_text", "")
@@ -231,6 +240,8 @@ class KernelHost:
                 f"error={res.get('error_text')!r})"
                 + self._bootstrap_error_detail()
             )
+        # Probe passed: the kernel is fully booted and tools may dispatch to it.
+        self._ready.set()
 
     def _bootstrap_error_detail(self) -> str:
         """Best-effort fetch of the traceback ``_bootstrap.bootstrap()`` stashes
@@ -238,7 +249,7 @@ class KernelHost:
         absent (a missing dep, a Qt/GL init error) instead of just ``False``.
         """
         try:
-            res = self.execute(
+            res = self._execute_internal(
                 "print(globals().get('_BOOTSTRAP_ERROR', ''), end='')",
                 timeout=self._startup_timeout,
             )
@@ -254,8 +265,37 @@ class KernelHost:
 
         Returns ``{stdout, result_text, error_text, status}`` where ``status``
         is one of ``ok``/``error`` (from the kernel reply), ``timeout`` (the
-        execution exceeded *timeout* and was interrupted), or ``busy`` (the
-        kernel lock could not be acquired within ``busy_lock_timeout``).
+        execution exceeded *timeout* and was interrupted), ``busy`` (the kernel
+        lock could not be acquired within ``busy_lock_timeout``), or
+        ``starting`` (the kernel was still booting and did not become ready
+        within ``startup_timeout``).
+
+        The kernel boots off-thread (so the launcher can serve the MCP handshake
+        immediately), so a tool call may land before the kernel is ready. Rather
+        than error on a half-built kernel, wait on the readiness signal up to
+        the startup budget and report ``starting`` if it never arrives.
+        """
+        if not self._ready.is_set() and not self._ready.wait(
+            self._startup_timeout
+        ):
+            return {
+                "stdout": "",
+                "result_text": "",
+                "error_text": (
+                    "Kernel is still starting (napari viewer / dask bring-up). "
+                    "Retry in a few seconds."
+                ),
+                "status": "starting",
+            }
+        return self._execute_internal(code, timeout)
+
+    def _execute_internal(
+        self, code: str, timeout: Optional[float] = None
+    ) -> dict:
+        """Lock-guarded execution, bypassing the readiness wait.
+
+        Used by the startup health probe and bootstrap-error fetch, which run
+        *before* the kernel is marked ready (so they must not wait on it).
         """
         if timeout is None:
             timeout = self._execute_timeout
@@ -397,6 +437,9 @@ class KernelHost:
             self._shutdown_current()
 
     def _shutdown_current(self):
+        # The kernel is going away: tools must wait for the next successful
+        # health probe (restart/respawn) before dispatching again.
+        self._ready.clear()
         try:
             if self._kc is not None:
                 self._kc.stop_channels()
@@ -518,6 +561,7 @@ class KernelHost:
         """Liveness summary for server_status (cheap; takes no lock)."""
         return {
             "alive": self.is_alive(),
+            "ready": self._ready.is_set(),
             "busy": self.is_busy(),
             "dead": self._dead,
             "recent_respawns": len(self._respawn_times),

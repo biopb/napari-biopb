@@ -68,6 +68,7 @@ def mock_kernel_host():
     host.is_busy.return_value = False
     host.health.return_value = {
         "alive": True,
+        "ready": True,
         "busy": False,
         "dead": False,
         "recent_respawns": 0,
@@ -416,6 +417,22 @@ class TestServerStatus:
         result = _server.server_status()
         assert "Sessions" not in result
         assert "Bridge" not in result
+
+    def test_starting_kernel_skips_query(self, server_with_host):
+        # Kernel still booting (launcher serves the handshake first): report the
+        # state and do NOT query the kernel — execute() would block on readiness.
+        server_with_host.health.return_value = {
+            "alive": True,
+            "ready": False,
+            "busy": False,
+            "dead": False,
+            "recent_respawns": 0,
+            "watchdog_running": True,
+        }
+        result = _server.server_status()
+        assert "ready: False" in result
+        assert "starting" in result.lower()
+        server_with_host.execute.assert_not_called()
 
 
 # -----------------------------------------------------------------------

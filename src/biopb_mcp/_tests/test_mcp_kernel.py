@@ -371,17 +371,42 @@ class TestHealth:
             h = host.health()
             assert set(h) == {
                 "alive",
+                "ready",
                 "busy",
                 "dead",
                 "recent_respawns",
                 "watchdog_running",
             }
             assert h["alive"] is True
+            assert h["ready"] is True
             assert h["dead"] is False
             assert h["watchdog_running"] is True
         finally:
             host.shutdown()
         assert host.health()["watchdog_running"] is False
+
+
+class TestReadiness:
+    """The kernel boots off-thread (launcher serves the handshake first), so
+    execute() must wait on readiness rather than race a half-built kernel."""
+
+    def test_execute_before_ready_reports_starting(self):
+        # Never started: not ready, no client. execute() should wait out the
+        # (tiny) startup budget and report "starting" instead of erroring.
+        host = KernelHost(startup_timeout=0.2, parent_death_pipe=False)
+        assert host.health()["ready"] is False
+        res = host.execute("print('hi')")
+        assert res["status"] == "starting"
+        assert "starting" in res["error_text"].lower()
+
+    def test_ready_after_start_then_cleared_on_shutdown(self):
+        host = KernelHost(health_probe_code=None, parent_death_pipe=False)
+        host.start()
+        try:
+            assert host.health()["ready"] is True
+        finally:
+            host.shutdown()
+        assert host.health()["ready"] is False
 
 
 class TestParentDeathPipe:

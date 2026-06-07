@@ -565,6 +565,7 @@ def server_status() -> str:
     )
     health = host.health()
     lines.append(f"  alive: {health['alive']}")
+    lines.append(f"  ready: {health['ready']}")
     lines.append(f"  busy: {health['busy']}")
     lines.append(f"  watchdog_running: {health['watchdog_running']}")
     if health["recent_respawns"]:
@@ -573,6 +574,14 @@ def server_status() -> str:
         lines.append(
             "  state: DEAD — respawn budget exhausted; call restart_kernel"
         )
+
+    # Don't query the kernel while it is still booting — execute() would block
+    # on readiness for the whole startup budget. Report the state and return.
+    if not health["ready"]:
+        lines.append(
+            "  state: starting — kernel/viewer still booting; retry shortly"
+        )
+        return "\n".join(lines)
 
     res = host.execute(_STATUS_SNIPPET, timeout=15.0)
     if res.get("status") == "ok":
