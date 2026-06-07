@@ -441,6 +441,11 @@ class KernelHost:
         with self._lock:
             # Tell the watchdog this alive->dead transition is intentional.
             self._stopping = True
+            # A restart is a recovery attempt: clear any stale failure up front
+            # so a concurrent server_status/execute (which read _start_error
+            # without the lock) see "starting" (recovering) rather than the old
+            # error while we rebuild. A fresh failure below records a new one.
+            self._start_error = None
             try:
                 try:
                     self._execute_locked(_DASK_RELEASE_SNIPPET, timeout=5.0)
@@ -457,7 +462,6 @@ class KernelHost:
                     self._start_error = str(exc) or repr(exc)
                     raise
                 # A manual restart clears the dead state and respawn budget.
-                self._start_error = None
                 self._dead = False
                 self._respawn_times.clear()
             finally:
