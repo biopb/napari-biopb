@@ -417,16 +417,22 @@ class TestHealth:
 
 class TestReadiness:
     """The kernel boots off-thread (launcher serves the handshake first), so
-    execute() must wait on readiness rather than race a half-built kernel."""
+    execute() returns a not-ready status immediately rather than blocking on
+    bring-up; the agent polls server_status to know when to retry."""
 
-    def test_execute_before_ready_reports_starting(self):
-        # Never started: not ready, no client. execute() should wait out the
-        # (tiny) startup budget and report "starting" instead of erroring.
-        host = KernelHost(startup_timeout=0.2, parent_death_pipe=False)
+    def test_execute_before_ready_returns_starting_immediately(self):
+        # Never started: not ready, no _start_error. execute() must return a
+        # "starting" status *without blocking* on readiness — a blocking wait
+        # could hang for the whole startup budget and trip the client's per-call
+        # timeout. The agent polls server_status / retries instead.
+        host = KernelHost(startup_timeout=60.0, parent_death_pipe=False)
         assert host.health()["ready"] is False
+        t0 = time.monotonic()
         res = host.execute("print('hi')")
+        elapsed = time.monotonic() - t0
         assert res["status"] == "starting"
-        assert "starting" in res["error_text"].lower()
+        assert "server_status" in res["error_text"]
+        assert elapsed < 1.0  # returned immediately, did not wait on readiness
 
     def test_ready_after_start_then_cleared_on_shutdown(self):
         host = KernelHost(health_probe_code=None, parent_death_pipe=False)
@@ -436,19 +442,6 @@ class TestReadiness:
         finally:
             host.shutdown()
         assert host.health()["ready"] is False
-
-    def test_readiness_wait_bounded_by_caller_timeout(self):
-        # A tool call during bring-up must not block for the whole (large)
-        # startup budget before its own timeout begins: the readiness wait is
-        # capped at the caller's timeout, so a short-timeout call reports
-        # "starting" promptly.
-        host = KernelHost(startup_timeout=60.0, parent_death_pipe=False)
-        t0 = time.monotonic()
-        res = host.execute("print('hi')", timeout=0.3)
-        elapsed = time.monotonic() - t0
-        assert res["status"] == "starting"
-        # Well under the 60s startup budget — it honored the 0.3s timeout.
-        assert elapsed < 5.0
 
 
 class TestStartRestartSerialization:

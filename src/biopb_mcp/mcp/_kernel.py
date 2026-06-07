@@ -298,52 +298,41 @@ class KernelHost:
         is one of ``ok``/``error`` (from the kernel reply), ``timeout`` (the
         execution exceeded *timeout* and was interrupted), ``busy`` (the kernel
         lock could not be acquired within ``busy_lock_timeout``), or
-        ``starting`` (the kernel was still booting and did not become ready
-        within the readiness wait below).
+        ``starting`` (the kernel is not ready yet — see below).
 
         The kernel boots off-thread (so the launcher can serve the MCP handshake
-        immediately), so a tool call may land before the kernel is ready. Rather
-        than error on a half-built kernel, wait on the readiness signal — but
-        only up to the caller's *timeout* (the startup budget when *timeout* is
-        None), so a call during bring-up does not block far past what the caller
-        asked for before its execution timeout would even begin. If the bring-up
-        failed terminally (``_start_error`` set), report that error immediately;
-        if it is merely still in progress, report ``starting``.
+        immediately), so a tool call may land before the kernel is ready. We do
+        NOT block the call on bring-up: a blocking wait could hang for the whole
+        startup budget and trip the client's per-call timeout into an opaque
+        error. Instead, return immediately with a structured not-ready status
+        the agent can act on — ``error`` when the bring-up failed terminally
+        (``_start_error`` set; call restart_kernel) or ``starting`` when it is
+        still in progress (poll ``server_status`` / retry). ``server_status`` is
+        a cheap, non-blocking readiness probe meant for exactly this.
         """
         if not self._ready.is_set():
-            # Only wait if the bring-up hasn't already failed: a recorded
-            # _start_error means readiness will never arrive, so don't block on
-            # it. Bound the wait by the caller's timeout (startup budget when
-            # None) so execute() can't block ~startup_timeout *before* the
-            # execution timeout starts.
-            if self._start_error is None:
-                ready_wait = (
-                    self._startup_timeout if timeout is None else timeout
-                )
-                self._ready.wait(ready_wait)
-            if not self._ready.is_set():
-                err = self._start_error
-                if err is not None:
-                    return {
-                        "stdout": "",
-                        "result_text": "",
-                        "error_text": (
-                            "Kernel startup failed: "
-                            + err
-                            + " The kernel is not running; call restart_kernel "
-                            "to retry."
-                        ),
-                        "status": "error",
-                    }
+            err = self._start_error
+            if err is not None:
                 return {
                     "stdout": "",
                     "result_text": "",
                     "error_text": (
-                        "Kernel is still starting (napari viewer / dask "
-                        "bring-up). Retry in a few seconds."
+                        "Kernel startup failed: "
+                        + err
+                        + " The kernel is not running; call restart_kernel "
+                        "to retry."
                     ),
-                    "status": "starting",
+                    "status": "error",
                 }
+            return {
+                "stdout": "",
+                "result_text": "",
+                "error_text": (
+                    "Kernel is still starting (napari viewer / dask bring-up). "
+                    "Poll server_status or retry in a few seconds."
+                ),
+                "status": "starting",
+            }
         return self._execute_internal(code, timeout)
 
     def _execute_internal(
