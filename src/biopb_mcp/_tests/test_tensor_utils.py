@@ -96,32 +96,34 @@ class TestBuildPyramidLevels:
         # First level: scale_hint = [1, 1, 1]
         first_hint = client.get_tensor.call_args_list[0][1]["scale_hint"]
         assert first_hint == [1, 1, 1]
-        # Second level: z stays 1, y and x scale to 2
+        # Second level: z stays 1, y and x scale by the downscale factor
+        from biopb_mcp._tensor_utils import PYRAMID_DOWNSCALE_FACTOR
+
         second_hint = client.get_tensor.call_args_list[1][1]["scale_hint"]
         assert second_hint[0] == 1  # z
-        assert second_hint[1] == 2  # y
-        assert second_hint[2] == 2  # x
+        assert second_hint[1] == PYRAMID_DOWNSCALE_FACTOR  # y
+        assert second_hint[2] == PYRAMID_DOWNSCALE_FACTOR  # x
 
 
 def _make_metadata_client(
     psx=None, psy=None, psz=None, unit="µm", raises=False
 ):
-    """Mock TensorFlightClient whose get_source_metadata returns an OME-like
-    object exposing physical pixel sizes."""
+    """Mock TensorFlightClient whose get_source_metadata returns the OME
+    metadata as a dict (the server's OME model dumped to JSON), matching the
+    real client contract."""
     client = MagicMock()
     if raises:
         client.get_source_metadata.side_effect = RuntimeError("boom")
         return client
-    pixels = types.SimpleNamespace(
-        physical_size_x=psx,
-        physical_size_y=psy,
-        physical_size_z=psz,
-        physical_size_x_unit=unit,
-        physical_size_y_unit=unit,
-        physical_size_z_unit=unit,
-    )
-    image = types.SimpleNamespace(pixels=pixels)
-    metadata = types.SimpleNamespace(images=[image])
+    pixels = {
+        "physical_size_x": psx,
+        "physical_size_y": psy,
+        "physical_size_z": psz,
+        "physical_size_x_unit": unit,
+        "physical_size_y_unit": unit,
+        "physical_size_z_unit": unit,
+    }
+    metadata = {"images": [{"pixels": pixels}]}
     client.get_source_metadata.return_value = metadata
     return client
 

@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 PYRAMID_THRESHOLD = 4096
 
+# Downscale factor between successive pyramid levels.  A 4x step (vs the
+# conventional 2x) roughly halves the number of levels for a large image,
+# which halves the per-level ``get_tensor`` descriptor round trips paid on
+# every ``add_tensor`` (the dominant cost in pyramid construction).  4x is
+# coarser than 2x, so napari may read up to 4x more pixels per slice when the
+# zoom falls between levels, but for these datasets that trade-off is still
+# usable.  napari infers level ratios from array shapes, so non-2x steps are
+# fine.
+PYRAMID_DOWNSCALE_FACTOR = 4
+
 
 def get_xy_dim_indices(tensor_desc) -> Tuple[int, int]:
     """Get indices of x and y dimensions from tensor descriptor.
@@ -74,12 +84,15 @@ def build_pyramid_levels(
         arr = client.get_tensor(source_id, tensor_id, scale_hint=scale_hint)
         levels.append(arr)
 
-        scaled_x = x_size // scale
-        scaled_y = y_size // scale
-        if scaled_x < min_size or scaled_y < min_size:
+        # Peek at the next level and stop *before* adding one that would fall
+        # below ``min_size``.  Checking after appending (the old behaviour)
+        # always emitted one sub-``min_size`` level; with the coarser 4x step
+        # that final jump overshoots badly (e.g. 889 -> 222 for a 14234 image).
+        next_scale = scale * PYRAMID_DOWNSCALE_FACTOR
+        if x_size // next_scale < min_size or y_size // next_scale < min_size:
             break
 
-        scale *= 2
+        scale = next_scale
 
     return levels
 
@@ -92,9 +105,10 @@ def build_layer_scale(
 ) -> Tuple[Optional[List[float]], Optional[dict]]:
     """Build a napari ``scale`` vector from a source's OME pixel sizes.
 
-    Reads ``client.get_source_metadata`` (an ``ome_types`` OME object) and maps
-    ``physical_size_x/y/z`` onto the tensor's dimension axes, so areas/volumes
-    the agent computes come out in physical units (e.g. µm²) instead of pixels.
+    Reads ``client.get_source_metadata`` (a dict — the server's OME model
+    dumped to JSON) and maps ``physical_size_x/y/z`` onto the tensor's
+    dimension axes, so areas/volumes the agent computes come out in physical
+    units (e.g. µm²) instead of pixels.
 
     Axis order comes from ``tensor_desc.dim_labels``, falling back to the source
     descriptor's ``dim_labels`` (``source_desc``) when the per-tensor labels are
@@ -118,17 +132,17 @@ def build_layer_scale(
     try:
         metadata = client.get_source_metadata(source_id)
 
-        images = getattr(metadata, "images", None)
+        images = metadata.get("images") if isinstance(metadata, dict) else None
         if not images:
             return None, None
-        pixels = getattr(images[0], "pixels", None)
-        if pixels is None:
+        pixels = images[0].get("pixels")
+        if not pixels:
             return None, None
 
         psize = {
-            "x": _positive_float(getattr(pixels, "physical_size_x", None)),
-            "y": _positive_float(getattr(pixels, "physical_size_y", None)),
-            "z": _positive_float(getattr(pixels, "physical_size_z", None)),
+            "x": _positive_float(pixels.get("physical_size_x")),
+            "y": _positive_float(pixels.get("physical_size_y")),
+            "z": _positive_float(pixels.get("physical_size_z")),
         }
         if not any(psize.values()):
             return None, None
@@ -156,15 +170,9 @@ def build_layer_scale(
             "physical_size_x": psize["x"],
             "physical_size_y": psize["y"],
             "physical_size_z": psize["z"],
-            "physical_size_x_unit": getattr(
-                pixels, "physical_size_x_unit", None
-            ),
-            "physical_size_y_unit": getattr(
-                pixels, "physical_size_y_unit", None
-            ),
-            "physical_size_z_unit": getattr(
-                pixels, "physical_size_z_unit", None
-            ),
+            "physical_size_x_unit": pixels.get("physical_size_x_unit"),
+            "physical_size_y_unit": pixels.get("physical_size_y_unit"),
+            "physical_size_z_unit": pixels.get("physical_size_z_unit"),
         }
         return scale, info
     except Exception as exc:
