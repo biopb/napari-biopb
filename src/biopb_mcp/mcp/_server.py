@@ -478,16 +478,17 @@ def execute_code(python_code: str) -> str:
     dict of image processing operations). np and da are also imported. Variables persist
     across calls until the kernel is restarted.
 
-    Code runs in a background thread to NOT block main thread:
-    if it finishes quickly the result is returned inline; otherwise this returns
+    Code runs in a background thread so it does not block the main thread.
+    If it finishes quickly the result is returned inline; otherwise this returns
     a job handle (job-N) and the code keeps running. Poll it with poll_job,
     watch it with take_screenshot / server_status, and stop it with cancel_job
     (cooperative) or restart_kernel (guaranteed). Only one job runs at a time.
 
-    Results include print() output and the last expression's repr. note rich IPython display() output is not captured
+    Results include print() output and the last expression's repr. Rich IPython
+    display() output is not captured; use print().
 
-    Inside a job, functions mutating the viewer should be wrapped, run_on_main(fn), so they run on the main thread.
-    Viewer's own add_* methods are pre-wrapped.
+    Inside a job, wrap viewer mutations in run_on_main(fn) so they run on the Qt
+    main thread. Viewer's add_* methods are pre-wrapped.
     """
     host = _kernel_host
     if host is None:
