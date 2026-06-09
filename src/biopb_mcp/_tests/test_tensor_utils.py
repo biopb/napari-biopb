@@ -7,6 +7,7 @@ import pytest
 
 from biopb_mcp._config import get_default_config, get_setting
 from biopb_mcp._tensor_utils import (
+    add_tensor_layer,
     build_layer_scale,
     build_pyramid_levels,
     get_xy_dim_indices,
@@ -192,3 +193,41 @@ def test_build_layer_scale_falls_back_to_source_dim_labels():
     source_desc = types.SimpleNamespace(dim_labels=["z", "y", "x"])
     scale, _ = build_layer_scale(client, "src", desc, source_desc=source_desc)
     assert scale == [3.0, 0.5, 0.5]
+
+
+class TestAddTensorLayer:
+    """The shared build-pyramid -> wrap -> OME scale -> add_image pipeline
+    used by both the Tensor Browser widget and the MCP add_tensor."""
+
+    def test_multiscale_with_ome_scale_and_metadata(self):
+        viewer = MagicMock()
+        client = _make_metadata_client(psx=0.5, psy=0.25)
+        client.get_tensor.return_value = MagicMock()
+        desc = _make_tensor_desc([8192, 8192], ["y", "x"])
+
+        add_tensor_layer(
+            viewer, client, "src", "t1", desc, name="lyr", config=_CFG
+        )
+
+        levels_arg = viewer.add_image.call_args[0][0]
+        _, kwargs = viewer.add_image.call_args
+        assert isinstance(levels_arg, list) and len(levels_arg) > 1
+        assert kwargs["name"] == "lyr"
+        assert kwargs["multiscale"] is True
+        assert kwargs["scale"] == [0.25, 0.5]
+        phys = kwargs["metadata"]["ome_physical_size"]
+        assert phys["physical_size_x"] == 0.5
+
+    def test_single_level_omits_multiscale_and_scale(self):
+        viewer = MagicMock()
+        # No physical sizes -> no scale/metadata kwargs.
+        client = _make_metadata_client()
+        client.get_tensor.return_value = MagicMock()
+        desc = _make_tensor_desc([256, 256], ["y", "x"])
+
+        add_tensor_layer(
+            viewer, client, "src", "t1", desc, name="lyr", config=_CFG
+        )
+
+        _, kwargs = viewer.add_image.call_args
+        assert kwargs == {"name": "lyr"}

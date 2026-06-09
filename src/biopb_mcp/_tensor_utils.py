@@ -179,3 +179,52 @@ def build_layer_scale(
     except Exception as exc:
         logger.warning("build_layer_scale failed for %s: %s", source_id, exc)
         return None, None
+
+
+def add_tensor_layer(
+    viewer,
+    client: TensorFlightClient,
+    source_id: str,
+    tensor_id: str,
+    tensor_desc,
+    *,
+    name: str,
+    source_desc=None,
+    compute_scheduler: Optional[str] = None,
+    config: Optional[dict] = None,
+):
+    """Build a tensor's pyramid and add it to *viewer* as an image layer.
+
+    The shared "load a tensor into the viewer" pipeline used by both the Tensor
+    Browser widget and the MCP ``add_tensor``: build pyramid levels, pin their
+    slice reads to a single-process scheduler so the serial viewer shares the
+    main-process chunk cache (issue #8; no-op standalone), attach the source's
+    OME physical pixel size as ``scale`` + ``metadata['ome_physical_size']`` so
+    the agent's areas/volumes come out in physical units, then ``add_image``
+    (``multiscale=True`` when there is more than one level).
+
+    Source resolution, layer *name*, and any cursor/logging/error handling stay
+    with the caller; everything from building levels through ``add_image`` is
+    uniform here so the three call sites can't drift.
+
+    Returns the created napari layer.
+    """
+    from ._viewer_compute import wrap_levels
+
+    levels = build_pyramid_levels(
+        client, source_id, tensor_id, tensor_desc, config=config
+    )
+    levels = wrap_levels(levels, compute_scheduler)
+
+    add_kwargs = {"name": name}
+    scale, phys = build_layer_scale(
+        client, source_id, tensor_desc, source_desc=source_desc
+    )
+    if scale is not None:
+        add_kwargs["scale"] = scale
+    if phys is not None:
+        add_kwargs["metadata"] = {"ome_physical_size": phys}
+
+    if len(levels) > 1:
+        return viewer.add_image(levels, multiscale=True, **add_kwargs)
+    return viewer.add_image(levels[0], **add_kwargs)
