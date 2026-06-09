@@ -29,6 +29,27 @@ def _make_tensor_desc(shape, dim_labels=None):
     return desc
 
 
+def _arr_with_shape(shape):
+    arr = MagicMock()
+    arr.shape = list(shape)
+    return arr
+
+
+def _scaling_side_effect(shape):
+    """get_tensor side effect returning an array whose ``.shape`` is *shape*
+    downsampled per ``scale_hint`` (floor division).
+
+    build_pyramid_levels reads the *returned* array's real extents (the server's
+    downsample rounding isn't part of the API), so multi-level pyramid tests
+    must hand back arrays whose shape actually shrinks with the scale hint."""
+
+    def _get_tensor(source_id, tensor_id, scale_hint=None):
+        hint = scale_hint or [1] * len(shape)
+        return _arr_with_shape([max(1, s // h) for s, h in zip(shape, hint)])
+
+    return _get_tensor
+
+
 class TestGetXyDimIndices:
     def test_uses_dim_labels(self):
         desc = _make_tensor_desc([10, 512, 512], dim_labels=["z", "y", "x"])
@@ -74,7 +95,7 @@ class TestBuildPyramidLevels:
     def test_small_image_returns_single_level(self):
         desc = _make_tensor_desc([256, 256])
         client = MagicMock()
-        mock_arr = MagicMock()
+        mock_arr = _arr_with_shape([256, 256])
         client.get_tensor.return_value = mock_arr
 
         levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
@@ -89,7 +110,9 @@ class TestBuildPyramidLevels:
     def test_threshold_boundary_no_pyramid(self):
         desc = _make_tensor_desc([THRESHOLD, THRESHOLD])
         client = MagicMock()
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.return_value = _arr_with_shape(
+            [THRESHOLD, THRESHOLD]
+        )
 
         levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
         assert len(levels) == 1
@@ -97,7 +120,7 @@ class TestBuildPyramidLevels:
     def test_large_image_builds_pyramid(self):
         desc = _make_tensor_desc([8192, 8192])
         client = MagicMock()
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.side_effect = _scaling_side_effect([8192, 8192])
 
         levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
@@ -110,7 +133,7 @@ class TestBuildPyramidLevels:
         # A thin z (10 < floor) stays full-res while x/y shrink.
         desc = _make_tensor_desc([10, 8192, 8192], dim_labels=["z", "y", "x"])
         client = MagicMock()
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.side_effect = _scaling_side_effect([10, 8192, 8192])
 
         levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
@@ -136,7 +159,7 @@ class TestBuildPyramidLevels:
         size = 100000
         desc = _make_tensor_desc([size, size])
         client = MagicMock()
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.side_effect = _scaling_side_effect([size, size])
 
         build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
@@ -159,11 +182,13 @@ class TestBuildPyramidLevels:
             [3000, 8192, 8192], dim_labels=["z", "y", "x"]
         )
         client = MagicMock()
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.side_effect = _scaling_side_effect(
+            [3000, 8192, 8192]
+        )
 
         build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
-        budget = get_setting(_CFG, "pyramid.pixel_budget")
+        budget = get_setting(_CFG, "pyramid.pixel_budget_cubic_root") ** 3
         last = client.get_tensor.call_args_list[-1][1]["scale_hint"]
         sz, sy, sx = last[0], last[1], last[2]
         lz, ly, lx = 3000 // sz, 8192 // sy, 8192 // sx
@@ -174,7 +199,7 @@ class TestBuildPyramidLevels:
         # No z label -> Lz treated as 1; the pyramid never adds a z factor.
         desc = _make_tensor_desc([8192, 8192], dim_labels=["y", "x"])
         client = MagicMock()
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.side_effect = _scaling_side_effect([8192, 8192])
 
         build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
@@ -270,7 +295,7 @@ class TestAddTensorLayer:
     def test_multiscale_with_ome_scale_and_metadata(self):
         viewer = MagicMock()
         client = _make_metadata_client(psx=0.5, psy=0.25)
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.side_effect = _scaling_side_effect([8192, 8192])
         desc = _make_tensor_desc([8192, 8192], ["y", "x"])
 
         add_tensor_layer(
@@ -290,7 +315,7 @@ class TestAddTensorLayer:
         viewer = MagicMock()
         # No physical sizes -> no scale/metadata kwargs.
         client = _make_metadata_client()
-        client.get_tensor.return_value = MagicMock()
+        client.get_tensor.return_value = _arr_with_shape([256, 256])
         desc = _make_tensor_desc([256, 256], ["y", "x"])
 
         add_tensor_layer(

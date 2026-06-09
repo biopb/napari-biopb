@@ -85,17 +85,24 @@ def build_pyramid_levels(
 
     - ``threshold`` -- max x/y extent of the coarsest level (caps 2-D reads),
     - ``downscale_factor`` -- linear step between levels,
-    - ``pixel_budget`` -- max voxels (``Lx*Ly*Lz``) in the coarsest level, which
-      bounds the whole-volume read napari issues in 3-D.
+    - ``pixel_budget_cubic_root`` -- per-axis floor; its cube is the max voxels
+      (``Lx*Ly*Lz``) allowed in the coarsest level, bounding the whole-volume
+      read napari issues in 3-D. Stored as the cube root (not the product) so
+      the floor and the budget are exact integers, free of cube-root rounding.
 
     Each level is requested at the current per-axis scale, then x, y and z are
     downsampled *individually* -- skipping any axis that has reached the floor
-    (the budget's cube root, capped at ``threshold``) -- until the coarsest
-    level fits both ``pixel_budget`` and ``threshold`` in x/y. The floor keeps
+    (``pixel_budget_cubic_root``, capped at ``threshold``) -- until the coarsest
+    level fits both the voxel budget and ``threshold`` in x/y. The floor keeps
     small axes (channels, time, thin z) from being over-shrunk and guarantees
     termination: once every axis is at or below it, ``Lx*Ly*Lz <= floor**3 <=
-    pixel_budget`` and ``Lx, Ly <= threshold``. A tensor without a z axis is
-    treated as ``Lz = 1`` and never gets a z scale factor.
+    budget`` and ``Lx, Ly <= threshold``. A tensor without a z axis is treated
+    as ``Lz = 1`` and never gets a z scale factor.
+
+    The per-level extents are read from the *returned* array's shape, not
+    computed as ``L // scale`` -- the server's downsample rounding (floor vs
+    ceil) is not part of the API contract, so trusting the real shape keeps the
+    budget check correct either way.
 
     Returns:
         List of dask arrays at different resolution levels (pyramid)
@@ -104,10 +111,10 @@ def build_pyramid_levels(
         config = load_config()
     threshold = get_setting(config, "pyramid.threshold")
     downscale_factor = get_setting(config, "pyramid.downscale_factor")
-    pixel_budget = get_setting(config, "pyramid.pixel_budget")
+    budget_root = get_setting(config, "pyramid.pixel_budget_cubic_root")
+    pixel_budget = budget_root**3
 
-    shape = tensor_desc.shape
-    ndim = len(shape)
+    ndim = len(tensor_desc.shape)
 
     y_idx, x_idx = get_xy_dim_indices(tensor_desc)
     z_idx = get_z_dim_index(tensor_desc)
@@ -115,13 +122,9 @@ def build_pyramid_levels(
     if z_idx is not None and z_idx in (x_idx, y_idx):
         z_idx = None
 
-    x_size = shape[x_idx]
-    y_size = shape[y_idx]
-    z_size = shape[z_idx] if z_idx is not None else 1
-
     # Stop shrinking an axis once it reaches this floor; see the docstring for
     # why the cube-root-capped-at-threshold value guarantees termination.
-    axis_floor = min(round(pixel_budget ** (1.0 / 3.0)), threshold)
+    axis_floor = min(budget_root, threshold)
 
     levels = []
     sx = sy = sz = 1
@@ -136,7 +139,10 @@ def build_pyramid_levels(
         arr = client.get_tensor(source_id, tensor_id, scale_hint=scale_hint)
         levels.append(arr)
 
-        lx, ly, lz = x_size // sx, y_size // sy, z_size // sz
+        # Real downsampled extents from the returned array, not floor(L/scale).
+        lx = arr.shape[x_idx]
+        ly = arr.shape[y_idx]
+        lz = arr.shape[z_idx] if z_idx is not None else 1
         if (
             lx * ly * lz <= pixel_budget
             and lx <= threshold
