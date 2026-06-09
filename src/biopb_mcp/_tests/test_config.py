@@ -453,3 +453,54 @@ class TestConfigSingleton:
         save_config(config)
 
         assert CONFIG.get("widget.detection.min_score") == 0.9
+
+    def test_get_serialized_against_concurrent_reload(self, monkeypatch):
+        """get() holds the lock across _ensure_loaded + the dotted-path walk.
+
+        A reader paused *between* loading the cache and walking it must not let a
+        concurrent reload() null the cache out from under it (which would make
+        get() silently return the DEFAULT_CONFIG value instead of the on-disk
+        one). We force exactly that interleaving deterministically: a slow
+        _ensure_loaded blocks the reader at the critical point, then a reload
+        runs in another thread. With the lock held across the whole get(), the
+        reload blocks until the reader finishes; without it, the reload nulls
+        the cache mid-read.
+        """
+        import threading
+
+        path = get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            json.dump({"tensor_browser": {"server_url": "grpc://disk:1"}}, f)
+        CONFIG.reload()
+
+        real_ensure = CONFIG._ensure_loaded
+        at_critical_point = threading.Event()
+        proceed = threading.Event()
+
+        def slow_ensure():
+            real_ensure()  # cache is now populated from disk
+            at_critical_point.set()
+            proceed.wait(2)  # pause between load and the dotted-path walk
+
+        monkeypatch.setattr(CONFIG, "_ensure_loaded", slow_ensure)
+
+        result = {}
+
+        def getter():
+            result["v"] = CONFIG.get("tensor_browser.server_url")
+
+        g = threading.Thread(target=getter)
+        g.start()
+        assert at_critical_point.wait(2)
+
+        # Reader is parked mid-get(). Fire a reload from another thread: it must
+        # not take effect until the reader releases the lock.
+        r = threading.Thread(target=CONFIG.reload)
+        r.start()
+        r.join(0.3)
+        proceed.set()
+        g.join(2)
+        r.join(2)
+
+        assert result["v"] == "grpc://disk:1"

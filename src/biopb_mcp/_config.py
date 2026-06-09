@@ -399,7 +399,12 @@ def _atomic_write_json(path: Path, data: dict) -> None:
     never sees a half-written config: the rename is atomic on POSIX and Windows.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    # Unique per process *and* thread so two concurrent writers never collide on
+    # the temp file (CONFIG._save serializes them under the lock, but this keeps
+    # the helper safe if called directly, e.g. via save_config).
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     try:
         with tmp.open("w") as f:
             json.dump(data, f, indent=2)
@@ -441,9 +446,17 @@ class _Config:
         Same contract as :func:`get_setting` (the ambient form of it): on a miss
         at any level, returns *default* if given, else the ``DEFAULT_CONFIG``
         value, else raises ``KeyError``.
+
+        Holds the lock across the dotted-path walk so a read is never serialized
+        against a concurrent :meth:`set` / :meth:`reload`: without it a reader
+        could observe a half-applied multi-key write (a created-but-empty
+        intermediate section) or a momentarily-``None`` cache mid-reload, and
+        silently fall back to the default. ``RLock`` makes the nested
+        :meth:`_ensure_loaded` acquisition re-entrant.
         """
-        self._ensure_loaded()
-        return get_setting(self._data, path, default)
+        with self._lock:
+            self._ensure_loaded()
+            return get_setting(self._data, path, default)
 
     def set(self, path: str, value, *, persist: bool = True) -> None:
         """Set a dotted *path* in the cache; write through to disk by default.
@@ -486,6 +499,11 @@ class _Config:
         Escape hatch for code that threads the raw dict (the MCP bootstrap, the
         explicit-dict ``get_setting`` form). Callers must treat it as read-only;
         all mutation goes through :meth:`set`.
+
+        Unlike :meth:`get`, this returns a reference the caller dereferences
+        *outside* the lock, so it is **not** safe to hold across a concurrent
+        :meth:`set` -- use it for startup/single-threaded threading (the
+        bootstrap) and prefer :meth:`get` for thread-safe ambient reads.
         """
         self._ensure_loaded()
         return self._data
