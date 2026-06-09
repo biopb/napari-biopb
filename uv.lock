@@ -432,7 +432,7 @@ testing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "biopb", extras = ["tensor"], specifier = ">=0.5.8" },
+    { name = "biopb", extras = ["tensor"], specifier = ">=0.6.3" },
     { name = "distributed", marker = "extra == 'mcp'" },
     { name = "grpcio-health-checking" },
     { name = "ipykernel", marker = "extra == 'mcp'" },

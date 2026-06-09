@@ -29,9 +29,11 @@ dependencies = [
     "magicgui",
     "qtpy",
     "scikit-image",
-    # 0.5.8: localhost cache disable + configure_cache/worker-init cache plugin
-    # (data-plane chunk-cache budget used by mcp/_bootstrap._register_cache_plugin)
-    "biopb[tensor] >= 0.5.8",
+    # 0.6.3: query_sources(format=...) for pandas/arrow results (agent guidance
+    # in guide://tensor, issue #27); also carries the 0.5.8 localhost cache
+    # disable + configure_cache/worker-init cache plugin (data-plane chunk-cache
+    # budget used by mcp/_bootstrap._register_cache_plugin).
+    "biopb[tensor] >= 0.6.3",
     "opencv-python-headless",
     # grpcio (runtime) comes via biopb[tensor]; grpcio-health-checking pulls it
     # too and provides grpc_health.v1 used in image_processing/_grpc.py. We do
