@@ -42,22 +42,25 @@ class TestGetXyDimIndices:
         assert x_idx == 1
 
     def test_fallback_last_two_dims(self):
+        # Standard [..., Y, X]: Y is second-to-last, X is last.
         desc = _make_tensor_desc([3, 100, 200])
         y_idx, x_idx = get_xy_dim_indices(desc)
-        assert y_idx == 2
-        assert x_idx == 1
+        assert y_idx == 1
+        assert x_idx == 2
 
     def test_2d_no_labels(self):
+        # [Y, X]: Y first, X last.
         desc = _make_tensor_desc([100, 200])
         y_idx, x_idx = get_xy_dim_indices(desc)
-        assert y_idx == 1
-        assert x_idx == 0
+        assert y_idx == 0
+        assert x_idx == 1
 
     def test_labels_without_xy_falls_back(self):
+        # Labels present but no x/y -> positional [..., Y, X] fallback.
         desc = _make_tensor_desc([10, 512, 512], dim_labels=["z", "r", "c"])
         y_idx, x_idx = get_xy_dim_indices(desc)
-        assert y_idx == 2
-        assert x_idx == 1
+        assert y_idx == 1
+        assert x_idx == 2
 
 
 class TestBuildPyramidLevels:

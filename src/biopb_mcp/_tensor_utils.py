@@ -18,7 +18,8 @@ def get_xy_dim_indices(tensor_desc) -> Tuple[int, int]:
     """Get indices of x and y dimensions from tensor descriptor.
 
     Uses dim_labels as primary source (looks for 'x', 'y').
-    Falls back to last two dimensions if dim_labels not available.
+    Falls back to the last two dimensions under the standard ``[..., Y, X]``
+    convention (X last, Y second-to-last) when dim_labels are unavailable.
 
     Returns:
         Tuple of (y_index, x_index) - y first for row/col convention
@@ -35,9 +36,10 @@ def get_xy_dim_indices(tensor_desc) -> Tuple[int, int]:
             pass
 
     if ndim >= 2:
-        return (ndim - 1, ndim - 2)
+        # Standard [..., Y, X]: X is the last axis, Y the second-to-last.
+        return (ndim - 2, ndim - 1)
 
-    return (0, 1) if ndim == 2 else (0, 0)
+    return (0, 0)
 
 
 def build_pyramid_levels(
