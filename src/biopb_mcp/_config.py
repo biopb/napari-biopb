@@ -78,6 +78,16 @@ DEFAULT_CONFIG = {
         # between levels; napari infers level ratios from array shapes, so
         # non-2x steps are fine.
         "downscale_factor": 4,
+        # Voxel budget for the coarsest level's 3D whole-volume read (issue
+        # #29). napari's 3D mode reads the entire coarsest level (its last three
+        # axes -- z, y, x) in one shot, so an XY-only pyramid OOMs on a deep
+        # stack. Levels are emitted until the coarsest fits BOTH this budget
+        # (Lx*Ly*Lz) and `threshold` in x/y; x/y/z are downsampled individually,
+        # each stopping at the budget's cube root (capped at `threshold`) so
+        # small axes (channels, time, thin z) are never over-shrunk. Default
+        # 512**3 (~134M voxels). Voxel count, not bytes -- multiply by the
+        # dtype itemsize for the actual read size.
+        "pixel_budget": 512 * 512 * 512,
     },
     "timeout": {
         "health_check": 5.0,

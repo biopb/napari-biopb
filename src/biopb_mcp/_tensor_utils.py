@@ -48,6 +48,28 @@ def get_xy_dim_indices(tensor_desc) -> Tuple[int, int]:
     return (ndim - 2, ndim - 1)
 
 
+def get_z_dim_index(tensor_desc) -> Optional[int]:
+    """Index of the z (depth) axis, or ``None`` when the tensor has none.
+
+    Respects ``dim_labels`` ('z') first: when labels are present but carry no
+    'z', the tensor is taken to have no depth axis (``None``) -- not every 3-D+
+    tensor is volumetric (``[T, Y, X]``, ``[C, Y, X]`` have no z). With no
+    labels, assume the positional ``[..., Z, Y, X]`` convention -- the
+    third-from-last axis -- for 3-D+ tensors, and ``None`` for <3-D.
+
+    napari's 3-D mode displays the last three axes positionally, so this is only
+    the *true* depth when z sits at ``ndim-3``; a label-identified z elsewhere
+    is a mis-ordered source (handled by transposing to ``[..., Z, Y, X]``, a
+    separate concern). Mis-identifying a small channel/time axis as z is
+    low-risk: such axes stay below the pyramid floor and are never downsampled.
+    """
+    ndim = len(tensor_desc.shape)
+    if tensor_desc.dim_labels:
+        labels_lower = [str(label).lower() for label in tensor_desc.dim_labels]
+        return labels_lower.index("z") if "z" in labels_lower else None
+    return ndim - 3 if ndim >= 3 else None
+
+
 def build_pyramid_levels(
     client: TensorFlightClient,
     source_id: str,
@@ -55,15 +77,25 @@ def build_pyramid_levels(
     tensor_desc,
     config: Optional[dict] = None,
 ) -> List:
-    """Build pyramid levels for large x-y datasets.
+    """Build resolution-pyramid levels for a tensor.
 
-    ``threshold`` and ``downscale_factor`` come from the ``pyramid`` config
-    section (``config`` defaults to the on-disk config). A pyramid is built only
-    when an x/y dimension exceeds ``threshold``; levels are then emitted, each
-    downsampled ``downscale_factor`` from the last, until the coarsest level
-    fits within ``threshold`` in both x and y. Because the level before it
-    exceeded ``threshold``, the coarsest level always lands in
-    ``(threshold // downscale_factor, threshold]``.
+    One unified rule serves 2-D and 3-D data and bounds napari's 3-D
+    whole-volume read (issue #29). All knobs come from the ``pyramid`` config
+    section (``config`` defaults to the on-disk config):
+
+    - ``threshold`` -- max x/y extent of the coarsest level (caps 2-D reads),
+    - ``downscale_factor`` -- linear step between levels,
+    - ``pixel_budget`` -- max voxels (``Lx*Ly*Lz``) in the coarsest level, which
+      bounds the whole-volume read napari issues in 3-D.
+
+    Each level is requested at the current per-axis scale, then x, y and z are
+    downsampled *individually* -- skipping any axis that has reached the floor
+    (the budget's cube root, capped at ``threshold``) -- until the coarsest
+    level fits both ``pixel_budget`` and ``threshold`` in x/y. The floor keeps
+    small axes (channels, time, thin z) from being over-shrunk and guarantees
+    termination: once every axis is at or below it, ``Lx*Ly*Lz <= floor**3 <=
+    pixel_budget`` and ``Lx, Ly <= threshold``. A tensor without a z axis is
+    treated as ``Lz = 1`` and never gets a z scale factor.
 
     Returns:
         List of dask arrays at different resolution levels (pyramid)
@@ -72,36 +104,57 @@ def build_pyramid_levels(
         config = load_config()
     threshold = get_setting(config, "pyramid.threshold")
     downscale_factor = get_setting(config, "pyramid.downscale_factor")
+    pixel_budget = get_setting(config, "pyramid.pixel_budget")
 
     shape = tensor_desc.shape
     ndim = len(shape)
 
     y_idx, x_idx = get_xy_dim_indices(tensor_desc)
+    z_idx = get_z_dim_index(tensor_desc)
+    # A degenerate label set could map z onto an x/y axis; drop it if so.
+    if z_idx is not None and z_idx in (x_idx, y_idx):
+        z_idx = None
 
     x_size = shape[x_idx]
     y_size = shape[y_idx]
+    z_size = shape[z_idx] if z_idx is not None else 1
 
-    if x_size <= threshold and y_size <= threshold:
-        return [client.get_tensor(source_id, tensor_id)]
+    # Stop shrinking an axis once it reaches this floor; see the docstring for
+    # why the cube-root-capped-at-threshold value guarantees termination.
+    axis_floor = min(round(pixel_budget ** (1.0 / 3.0)), threshold)
 
     levels = []
-    scale = 1
+    sx = sy = sz = 1
 
     while True:
         scale_hint = [1] * ndim
-        scale_hint[y_idx] = scale
-        scale_hint[x_idx] = scale
+        scale_hint[x_idx] = sx
+        scale_hint[y_idx] = sy
+        if z_idx is not None:
+            scale_hint[z_idx] = sz
 
         arr = client.get_tensor(source_id, tensor_id, scale_hint=scale_hint)
         levels.append(arr)
 
-        # Stop once this level fits within the threshold in both x and y. The
-        # previous level exceeded it, so the coarsest level lands in
-        # (threshold // downscale_factor, threshold] -- no separate floor needed.
-        if x_size // scale <= threshold and y_size // scale <= threshold:
+        lx, ly, lz = x_size // sx, y_size // sy, z_size // sz
+        if (
+            lx * ly * lz <= pixel_budget
+            and lx <= threshold
+            and ly <= threshold
+        ):
             break
 
-        scale *= downscale_factor
+        # Downsample each axis individually, leaving any already at the floor.
+        nsx = sx * downscale_factor if lx > axis_floor else sx
+        nsy = sy * downscale_factor if ly > axis_floor else sy
+        nsz = (
+            sz * downscale_factor
+            if (z_idx is not None and lz > axis_floor)
+            else sz
+        )
+        if (nsx, nsy, nsz) == (sx, sy, sz):
+            break  # nothing left to shrink; avoid an infinite loop
+        sx, sy, sz = nsx, nsy, nsz
 
     return levels
 

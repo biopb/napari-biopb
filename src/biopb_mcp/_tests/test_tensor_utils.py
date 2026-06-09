@@ -11,6 +11,7 @@ from biopb_mcp._tensor_utils import (
     build_layer_scale,
     build_pyramid_levels,
     get_xy_dim_indices,
+    get_z_dim_index,
 )
 
 # Pyramid params now live in the ``pyramid`` config section. Resolve the
@@ -80,7 +81,10 @@ class TestBuildPyramidLevels:
 
         assert len(levels) == 1
         assert levels[0] is mock_arr
-        client.get_tensor.assert_called_once_with("src", "t1")
+        # Unified loop always passes a scale_hint, even for a single level.
+        client.get_tensor.assert_called_once_with(
+            "src", "t1", scale_hint=[1, 1]
+        )
 
     def test_threshold_boundary_no_pyramid(self):
         desc = _make_tensor_desc([THRESHOLD, THRESHOLD])
@@ -102,7 +106,8 @@ class TestBuildPyramidLevels:
         first_call = client.get_tensor.call_args_list[0]
         assert first_call == call("src", "t1", scale_hint=[1, 1])
 
-    def test_pyramid_only_scales_xy(self):
+    def test_small_z_is_not_downsampled(self):
+        # A thin z (10 < floor) stays full-res while x/y shrink.
         desc = _make_tensor_desc([10, 8192, 8192], dim_labels=["z", "y", "x"])
         client = MagicMock()
         client.get_tensor.return_value = MagicMock()
@@ -113,11 +118,16 @@ class TestBuildPyramidLevels:
         # First level: scale_hint = [1, 1, 1]
         first_hint = client.get_tensor.call_args_list[0][1]["scale_hint"]
         assert first_hint == [1, 1, 1]
-        # Second level: z stays 1, y and x scale by the downscale factor
+        # Second level: z stays 1 (too small to scale), y and x scale.
         second_hint = client.get_tensor.call_args_list[1][1]["scale_hint"]
         assert second_hint[0] == 1  # z
         assert second_hint[1] == FACTOR  # y
         assert second_hint[2] == FACTOR  # x
+        # z stays full-res at every level.
+        assert all(
+            c[1]["scale_hint"][0] == 1
+            for c in client.get_tensor.call_args_list
+        )
 
     def test_pyramid_coarsest_level_fits_within_threshold(self):
         # Levels are emitted until the coarsest fits within `threshold`.
@@ -141,6 +151,55 @@ class TestBuildPyramidLevels:
         # that's why another level was emitted.
         for s in scales[:-1]:
             assert size // s > THRESHOLD
+
+    def test_deep_stack_bounds_coarsest_volume_including_z(self):
+        # A deep stack must downsample z too, so the coarsest level's whole
+        # volume (Lz*Ly*Lx) fits the voxel budget (issue #29).
+        desc = _make_tensor_desc(
+            [3000, 8192, 8192], dim_labels=["z", "y", "x"]
+        )
+        client = MagicMock()
+        client.get_tensor.return_value = MagicMock()
+
+        build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
+
+        budget = get_setting(_CFG, "pyramid.pixel_budget")
+        last = client.get_tensor.call_args_list[-1][1]["scale_hint"]
+        sz, sy, sx = last[0], last[1], last[2]
+        lz, ly, lx = 3000 // sz, 8192 // sy, 8192 // sx
+        assert lx * ly * lz <= budget
+        assert sz > 1  # z was genuinely downsampled, not left at full res
+
+    def test_no_z_axis_emits_2d_scale_hints(self):
+        # No z label -> Lz treated as 1; the pyramid never adds a z factor.
+        desc = _make_tensor_desc([8192, 8192], dim_labels=["y", "x"])
+        client = MagicMock()
+        client.get_tensor.return_value = MagicMock()
+
+        build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
+
+        for c in client.get_tensor.call_args_list:
+            assert len(c[1]["scale_hint"]) == 2
+
+
+class TestGetZDimIndex:
+    def test_label_z_wins_over_position(self):
+        desc = _make_tensor_desc(
+            [10, 5, 512, 512], dim_labels=["z", "c", "y", "x"]
+        )
+        assert get_z_dim_index(desc) == 0
+
+    def test_labels_without_z_is_none(self):
+        # Labels present but no z -> not volumetric (e.g. [C, Y, X]).
+        desc = _make_tensor_desc([3, 512, 512], dim_labels=["c", "y", "x"])
+        assert get_z_dim_index(desc) is None
+
+    def test_no_labels_3d_positional(self):
+        # No labels -> assume [..., Z, Y, X]; z is third-from-last.
+        assert get_z_dim_index(_make_tensor_desc([20, 512, 512])) == 0
+
+    def test_no_labels_2d_is_none(self):
+        assert get_z_dim_index(_make_tensor_desc([512, 512])) is None
 
 
 def _make_metadata_client(
