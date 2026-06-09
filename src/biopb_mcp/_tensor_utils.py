@@ -9,19 +9,9 @@ from typing import List, Optional, Tuple
 
 from biopb.tensor import TensorFlightClient
 
+from ._config import get_setting, load_config
+
 logger = logging.getLogger(__name__)
-
-PYRAMID_THRESHOLD = 4096
-
-# Downscale factor between successive pyramid levels.  A 4x step (vs the
-# conventional 2x) roughly halves the number of levels for a large image,
-# which halves the per-level ``get_tensor`` descriptor round trips paid on
-# every ``add_tensor`` (the dominant cost in pyramid construction).  4x is
-# coarser than 2x, so napari may read up to 4x more pixels per slice when the
-# zoom falls between levels, but for these datasets that trade-off is still
-# usable.  napari infers level ratios from array shapes, so non-2x steps are
-# fine.
-PYRAMID_DOWNSCALE_FACTOR = 4
 
 
 def get_xy_dim_indices(tensor_desc) -> Tuple[int, int]:
@@ -55,12 +45,26 @@ def build_pyramid_levels(
     source_id: str,
     tensor_id: str,
     tensor_desc,
+    config: Optional[dict] = None,
 ) -> List:
     """Build pyramid levels for large x-y datasets.
+
+    ``threshold`` and ``downscale_factor`` come from the ``pyramid`` config
+    section (``config`` defaults to the on-disk config). A pyramid is built only
+    when an x/y dimension exceeds ``threshold``; levels are then emitted, each
+    downsampled ``downscale_factor`` from the last, until the coarsest level
+    fits within ``threshold`` in both x and y. Because the level before it
+    exceeded ``threshold``, the coarsest level always lands in
+    ``(threshold // downscale_factor, threshold]``.
 
     Returns:
         List of dask arrays at different resolution levels (pyramid)
     """
+    if config is None:
+        config = load_config()
+    threshold = get_setting(config, "pyramid.threshold")
+    downscale_factor = get_setting(config, "pyramid.downscale_factor")
+
     shape = tensor_desc.shape
     ndim = len(shape)
 
@@ -69,12 +73,11 @@ def build_pyramid_levels(
     x_size = shape[x_idx]
     y_size = shape[y_idx]
 
-    if x_size <= PYRAMID_THRESHOLD and y_size <= PYRAMID_THRESHOLD:
+    if x_size <= threshold and y_size <= threshold:
         return [client.get_tensor(source_id, tensor_id)]
 
     levels = []
     scale = 1
-    min_size = 256
 
     while True:
         scale_hint = [1] * ndim
@@ -84,15 +87,13 @@ def build_pyramid_levels(
         arr = client.get_tensor(source_id, tensor_id, scale_hint=scale_hint)
         levels.append(arr)
 
-        # Peek at the next level and stop *before* adding one that would fall
-        # below ``min_size``.  Checking after appending (the old behaviour)
-        # always emitted one sub-``min_size`` level; with the coarser 4x step
-        # that final jump overshoots badly (e.g. 889 -> 222 for a 14234 image).
-        next_scale = scale * PYRAMID_DOWNSCALE_FACTOR
-        if x_size // next_scale < min_size or y_size // next_scale < min_size:
+        # Stop once this level fits within the threshold in both x and y. The
+        # previous level exceeded it, so the coarsest level lands in
+        # (threshold // downscale_factor, threshold] -- no separate floor needed.
+        if x_size // scale <= threshold and y_size // scale <= threshold:
             break
 
-        scale = next_scale
+        scale *= downscale_factor
 
     return levels
 

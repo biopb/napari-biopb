@@ -5,12 +5,19 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from biopb_mcp._config import get_default_config, get_setting
 from biopb_mcp._tensor_utils import (
-    PYRAMID_THRESHOLD,
     build_layer_scale,
     build_pyramid_levels,
     get_xy_dim_indices,
 )
+
+# Pyramid params now live in the ``pyramid`` config section. Resolve the
+# defaults once and pass the config explicitly to build_pyramid_levels so the
+# tests don't depend on any on-disk config override.
+_CFG = get_default_config()
+THRESHOLD = get_setting(_CFG, "pyramid.threshold")
+FACTOR = get_setting(_CFG, "pyramid.downscale_factor")
 
 
 def _make_tensor_desc(shape, dim_labels=None):
@@ -59,18 +66,18 @@ class TestBuildPyramidLevels:
         mock_arr = MagicMock()
         client.get_tensor.return_value = mock_arr
 
-        levels = build_pyramid_levels(client, "src", "t1", desc)
+        levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
         assert len(levels) == 1
         assert levels[0] is mock_arr
         client.get_tensor.assert_called_once_with("src", "t1")
 
     def test_threshold_boundary_no_pyramid(self):
-        desc = _make_tensor_desc([PYRAMID_THRESHOLD, PYRAMID_THRESHOLD])
+        desc = _make_tensor_desc([THRESHOLD, THRESHOLD])
         client = MagicMock()
         client.get_tensor.return_value = MagicMock()
 
-        levels = build_pyramid_levels(client, "src", "t1", desc)
+        levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
         assert len(levels) == 1
 
     def test_large_image_builds_pyramid(self):
@@ -78,7 +85,7 @@ class TestBuildPyramidLevels:
         client = MagicMock()
         client.get_tensor.return_value = MagicMock()
 
-        levels = build_pyramid_levels(client, "src", "t1", desc)
+        levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
         assert len(levels) > 1
         # First call should be scale=1 (no scale_hint with all 1s)
@@ -90,43 +97,40 @@ class TestBuildPyramidLevels:
         client = MagicMock()
         client.get_tensor.return_value = MagicMock()
 
-        levels = build_pyramid_levels(client, "src", "t1", desc)
+        levels = build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
         assert len(levels) > 1
         # First level: scale_hint = [1, 1, 1]
         first_hint = client.get_tensor.call_args_list[0][1]["scale_hint"]
         assert first_hint == [1, 1, 1]
         # Second level: z stays 1, y and x scale by the downscale factor
-        from biopb_mcp._tensor_utils import PYRAMID_DOWNSCALE_FACTOR
-
         second_hint = client.get_tensor.call_args_list[1][1]["scale_hint"]
         assert second_hint[0] == 1  # z
-        assert second_hint[1] == PYRAMID_DOWNSCALE_FACTOR  # y
-        assert second_hint[2] == PYRAMID_DOWNSCALE_FACTOR  # x
+        assert second_hint[1] == FACTOR  # y
+        assert second_hint[2] == FACTOR  # x
 
-    def test_floored_stop_keeps_every_level_at_or_above_min_size(self):
-        # The floored stop peeks at the next level and breaks *before*
-        # emitting one below min_size (256).  16320 is the boundary case:
-        # the next 4x step past the last level would land on exactly 255
-        # (< 256), so the loop must stop just short of it.
-        from biopb_mcp._tensor_utils import PYRAMID_DOWNSCALE_FACTOR
-
-        min_size = 256
-        size = 16320
+    def test_pyramid_coarsest_level_fits_within_threshold(self):
+        # Levels are emitted until the coarsest fits within `threshold`.
+        # Because the previous level still exceeded it, the coarsest always
+        # lands in (threshold // factor, threshold].
+        size = 100000
         desc = _make_tensor_desc([size, size])
         client = MagicMock()
         client.get_tensor.return_value = MagicMock()
 
-        build_pyramid_levels(client, "src", "t1", desc)
+        build_pyramid_levels(client, "src", "t1", desc, config=_CFG)
 
         # x is the last dim for a 2D source; scale is symmetric in x/y.
         scales = [
             c[1]["scale_hint"][1] for c in client.get_tensor.call_args_list
         ]
-        # Every emitted level stays at or above min_size.
-        assert all(size // s >= min_size for s in scales)
-        # And the stop is floored: one more step would drop below min_size.
-        assert size // (scales[-1] * PYRAMID_DOWNSCALE_FACTOR) < min_size
+        coarsest = size // scales[-1]
+        assert coarsest <= THRESHOLD
+        assert coarsest > THRESHOLD // FACTOR
+        # Every level before the coarsest still exceeded the threshold --
+        # that's why another level was emitted.
+        for s in scales[:-1]:
+            assert size // s > THRESHOLD
 
 
 def _make_metadata_client(
