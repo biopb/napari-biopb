@@ -23,6 +23,10 @@ def get_xy_dim_indices(tensor_desc) -> Tuple[int, int]:
 
     Returns:
         Tuple of (y_index, x_index) - y first for row/col convention
+
+    Raises:
+        ValueError: the tensor has fewer than 2 dimensions (not a displayable
+            image).
     """
     ndim = len(tensor_desc.shape)
 
@@ -35,11 +39,13 @@ def get_xy_dim_indices(tensor_desc) -> Tuple[int, int]:
         except ValueError:
             pass
 
-    if ndim >= 2:
-        # Standard [..., Y, X]: X is the last axis, Y the second-to-last.
-        return (ndim - 2, ndim - 1)
-
-    return (0, 0)
+    if ndim < 2:
+        raise ValueError(
+            f"Cannot identify x/y dimensions: tensor is {ndim}-D; napari needs "
+            "at least 2 dimensions to display an image."
+        )
+    # Standard [..., Y, X]: X is the last axis, Y the second-to-last.
+    return (ndim - 2, ndim - 1)
 
 
 def build_pyramid_levels(

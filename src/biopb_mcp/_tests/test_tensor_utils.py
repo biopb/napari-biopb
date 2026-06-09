@@ -62,6 +62,12 @@ class TestGetXyDimIndices:
         assert y_idx == 1
         assert x_idx == 2
 
+    def test_under_2d_raises(self):
+        # A 1-D tensor is not a displayable image; fail loud rather than
+        # return a bogus (0, 0).
+        with pytest.raises(ValueError):
+            get_xy_dim_indices(_make_tensor_desc([100]))
+
 
 class TestBuildPyramidLevels:
     def test_small_image_returns_single_level(self):
