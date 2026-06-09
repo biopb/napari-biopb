@@ -104,6 +104,30 @@ class TestBuildPyramidLevels:
         assert second_hint[1] == PYRAMID_DOWNSCALE_FACTOR  # y
         assert second_hint[2] == PYRAMID_DOWNSCALE_FACTOR  # x
 
+    def test_floored_stop_keeps_every_level_at_or_above_min_size(self):
+        # The floored stop peeks at the next level and breaks *before*
+        # emitting one below min_size (256).  16320 is the boundary case:
+        # the next 4x step past the last level would land on exactly 255
+        # (< 256), so the loop must stop just short of it.
+        from biopb_mcp._tensor_utils import PYRAMID_DOWNSCALE_FACTOR
+
+        min_size = 256
+        size = 16320
+        desc = _make_tensor_desc([size, size])
+        client = MagicMock()
+        client.get_tensor.return_value = MagicMock()
+
+        build_pyramid_levels(client, "src", "t1", desc)
+
+        # x is the last dim for a 2D source; scale is symmetric in x/y.
+        scales = [
+            c[1]["scale_hint"][1] for c in client.get_tensor.call_args_list
+        ]
+        # Every emitted level stays at or above min_size.
+        assert all(size // s >= min_size for s in scales)
+        # And the stop is floored: one more step would drop below min_size.
+        assert size // (scales[-1] * PYRAMID_DOWNSCALE_FACTOR) < min_size
+
 
 def _make_metadata_client(
     psx=None, psy=None, psz=None, unit="µm", raises=False
