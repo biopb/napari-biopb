@@ -166,19 +166,14 @@ class TestSetupObserve:
         )
         return calls
 
-    def test_enabled_by_default_in_http(self, fake_observe):
-        # Opt-out: empty config -> on in http.
-        assert _setup_observe({}, "http") is True
+    def test_enabled_by_default(self, fake_observe):
+        # Opt-out: empty config -> on.
+        assert _setup_observe({}) is True
         assert fake_observe["http"] == 1
 
     def test_explicitly_disabled(self, fake_observe):
         cfg = {"mcp": {"observe": {"enabled": False}}}
-        assert _setup_observe(cfg, "http") is False
-        assert fake_observe == {"configure": 0, "http": 0}
-
-    def test_stdio_never_starts(self, fake_observe):
-        # http-only: even on-by-default, stdio must NOT mount or configure.
-        assert _setup_observe({}, "stdio") is False
+        assert _setup_observe(cfg) is False
         assert fake_observe == {"configure": 0, "http": 0}
 
     def test_failure_is_swallowed(self, monkeypatch):
@@ -191,4 +186,4 @@ class TestSetupObserve:
         monkeypatch.setattr(_observe, "register_http_routes", _boom)
         cfg = {"mcp": {"observe": {"enabled": True}}}
         # An observe failure must never propagate out of the launcher.
-        assert _setup_observe(cfg, "http") is False
+        assert _setup_observe(cfg) is False

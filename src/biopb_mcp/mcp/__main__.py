@@ -73,26 +73,17 @@ def _resolve_headless(display_mode, has_display):
     return not has_display
 
 
-def _setup_observe(config, transport):
-    """Wire up the web observe UI (http transport only).
+def _setup_observe(config):
+    """Wire up the web observe UI.
 
     On by default (``mcp.observe.enabled``, opt-out); it mounts on the existing
-    MCP app and shares its loop/port. It is **not** supported under stdio: a
-    second uvicorn server in the stdio launcher process risks corrupting the
-    fd-1 JSON-RPC channel and races the kernel, so under stdio it is silently
-    skipped (debug-logged, since it is on by default and most stdio users never
-    asked for it). Fully guarded — an observe failure logs and is swallowed so
-    it can never block the MCP server. Returns True if mounted.
+    MCP app and shares its loop/port. Fully guarded — an observe failure logs
+    and is swallowed so it can never block the MCP server. Returns True if
+    mounted.
     """
     from .._config import get_setting
 
     if not get_setting(config, "mcp.observe.enabled"):
-        return False
-    if transport != "http":
-        logger.debug(
-            "observe UI is http-only; not started under %s transport",
-            transport,
-        )
         return False
     try:
         from . import _observe
@@ -312,7 +303,7 @@ def _serve_http(config, port):
 
     # Opt-in web "observe" UI. Set up before the (blocking) transport run:
     # custom routes are read when the streamable-http app is built.
-    _setup_observe(config, "http")
+    _setup_observe(config)
 
     _server.run(
         port,
