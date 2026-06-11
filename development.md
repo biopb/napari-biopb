@@ -131,6 +131,11 @@ and not applied. NB:
 the orphaned-kernel risks (issue #13) are amplified under stdio (one kernel tree
 per client launch); the `PR_SET_PDEATHSIG`/watchdog hardening there is a
 prerequisite before recommending stdio for production.
+**stdio is deprecated** (docs/daemon-migration.md, Direction 1): launching it
+emits a `DeprecationWarning` plus a logged migration recipe, and it will be
+removed in a future release in favor of an http-only daemon (stdio-only
+clients bridge with `uvx mcp-proxy`). It stays the default during the
+deprecation window so existing client configs keep working.
 
 The process owns a **single child Jupyter kernel** (real IPython kernel via
 `jupyter_client`) that hosts the napari viewer, dask, and the tensor client.

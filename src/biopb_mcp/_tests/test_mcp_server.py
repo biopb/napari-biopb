@@ -7,6 +7,7 @@ exercise the server-side formatting/extraction without a real kernel.
 
 import base64
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -721,8 +722,31 @@ class TestRunStdio:
     def test_run_stdio_uses_stdio_transport(self, monkeypatch):
         calls = {}
         monkeypatch.setattr(_server.mcp, "run", lambda **kw: calls.update(kw))
-        _server.run_stdio()
+        with pytest.warns(DeprecationWarning):
+            _server.run_stdio()
         assert calls == {"transport": "stdio"}
+
+    def test_run_stdio_warns_deprecated_but_still_serves(
+        self, monkeypatch, caplog
+    ):
+        # Deprecation phase (docs/daemon-migration.md, Direction 1): stdio
+        # must warn — DeprecationWarning for programmatic users, a logged
+        # migration recipe for CLI users — yet keep serving unchanged.
+        monkeypatch.setattr(_server.mcp, "run", lambda **kw: None)
+        with (
+            caplog.at_level(logging.WARNING, logger=_server.__name__),
+            pytest.warns(DeprecationWarning, match="stdio transport"),
+        ):
+            _server.run_stdio()
+        warning_text = "\n".join(
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        )
+        assert "DEPRECATED" in warning_text
+        # The log line must carry the migration recipe, not just the verdict.
+        assert "--transport http" in warning_text
+        assert "mcp-proxy" in warning_text
 
     def test_run_http_uses_streamable_http(self, monkeypatch):
         calls = {}

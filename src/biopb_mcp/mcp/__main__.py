@@ -32,7 +32,9 @@ def _parse_args(argv, default_transport, default_port):
         "--transport",
         choices=["http", "stdio"],
         default=default_transport,
-        help="Front-end transport (default from config; falls back to stdio).",
+        help="Front-end transport (default from config; falls back to stdio). "
+        "stdio is deprecated and will be removed in a future release; "
+        "stdio-only clients should bridge to http with mcp-proxy.",
     )
     parser.add_argument(
         "--port",

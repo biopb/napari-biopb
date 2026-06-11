@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+import warnings
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -832,6 +833,14 @@ def run(port: int = 8765, allowed_origins=(), allowed_hosts=()):
 def run_stdio():
     """Run the MCP server over stdio (JSON-RPC on stdin/stdout).
 
+    .. deprecated::
+        The stdio transport is deprecated and will be removed in a future
+        release; biopb-mcp is moving to an http-only daemon (see
+        docs/daemon-migration.md, Direction 1). Use :func:`run` and connect
+        clients by URL, or front the http server with a generic
+        streamable-http<->stdio bridge (``uvx mcp-proxy``) for stdio-only
+        clients.
+
     The alternative to :func:`run`: a client spawns biopb-mcp as a subprocess
     and speaks JSON-RPC over the pipe. There is no listening socket, so the
     Host/Origin allowlist (:func:`build_transport_security`) is irrelevant and
@@ -839,5 +848,24 @@ def run_stdio():
     own stdout pristine (logging -> stderr) and the kernel's native output must
     be redirected away from fd 1 (the launcher passes a kernel log file).
     """
+    warnings.warn(
+        "biopb-mcp's stdio transport is deprecated and will be removed in a "
+        "future release; switch to the http transport",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    # Also log it: the warnings module writes to stderr only once per
+    # location, and most users meet this at the CLI where the log line (with
+    # the migration recipe) is the visible signal. stderr is safe in stdio
+    # mode — only fd 1 is the protocol channel.
+    logger.warning(
+        "The stdio transport is DEPRECATED and will be removed in a future "
+        "release. Switch to http: run `biopb-mcp --transport http` (or set "
+        "mcp.transport.kind to 'http') and point your client at "
+        "http://127.0.0.1:<port>/mcp — e.g. "
+        "`claude mcp add --transport http biopb http://127.0.0.1:8765/mcp`. "
+        "For stdio-only clients, bridge with `uvx mcp-proxy "
+        "http://127.0.0.1:8765/mcp`."
+    )
     logger.info("MCP server speaking stdio (JSON-RPC on stdin/stdout)")
     mcp.run(transport="stdio")

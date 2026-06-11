@@ -116,6 +116,12 @@ DEFAULT_CONFIG = {
             # "http" (loopback streamable-http on `port`). The kernel/viewer/dask
             # stack is identical either way. Overridable per-launch with
             # `--transport`.
+            #
+            # DEPRECATED: stdio is deprecated and will be removed in a future
+            # release (http-only daemon; see docs/daemon-migration.md). The
+            # default stays "stdio" for the deprecation window so existing
+            # client configs keep working; launching it logs a warning with
+            # the migration recipe (http + mcp-proxy for stdio-only clients).
             "kind": "stdio",
             "port": 8765,
             # Whether the kernel opens a visible napari viewer:
