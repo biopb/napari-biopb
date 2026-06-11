@@ -98,26 +98,52 @@ class TestEnsureDaemon:
 
     def test_spawns_and_waits_until_listening(self, tmp_path, monkeypatch):
         port = _free_port()
-        # Stand-in daemon: sleeps briefly (import time), then listens.
+        # Stand-in daemon: sleeps briefly (simulating import time), then binds
+        # and *accepts* connections. It must accept, not merely listen(): the
+        # readiness probe opens a fresh TCP connection on every poll, and an
+        # un-drained accept backlog makes a later probe fail on macOS's stricter
+        # socket stack (the real uvicorn daemon accepts, so this is a fixture
+        # artifact, not a production bug).
         script = (
-            "import socket,sys,time; time.sleep(1); "
-            "s=socket.socket(); s.bind(('127.0.0.1',int(sys.argv[1]))); "
-            "s.listen(1); time.sleep(30)"
+            "import socket, sys, threading, time\n"
+            "time.sleep(1)\n"
+            "s = socket.socket()\n"
+            "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+            "s.bind(('127.0.0.1', int(sys.argv[1])))\n"
+            "s.listen(16)\n"
+            "def _serve():\n"
+            "    while True:\n"
+            "        try:\n"
+            "            conn, _ = s.accept()\n"
+            "            conn.close()\n"
+            "        except OSError:\n"
+            "            break\n"
+            "threading.Thread(target=_serve, daemon=True).start()\n"
+            "time.sleep(30)\n"
         )
         monkeypatch.setattr(
             _shim,
             "_daemon_command",
             lambda p: [sys.executable, "-c", script, str(p)],
         )
+        # Track the detached child by handle so we reap it deterministically
+        # (no pattern-matching / pkill).
+        spawned = []
+        real_popen = _shim.subprocess.Popen
+
+        def _tracking_popen(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        monkeypatch.setattr(_shim.subprocess, "Popen", _tracking_popen)
         cfg = _cfg(kernel_log=str(tmp_path / "d.log"))
         try:
             assert _shim.ensure_daemon(cfg, port, timeout=15) is True
             assert _shim._port_listening(port) is True
         finally:
-            # The stand-in daemon's argv carries the port; kill it by that.
-            subprocess.run(
-                ["pkill", "-f", f"time.sleep.30. {port}"], check=False
-            )
+            for proc in spawned:
+                proc.kill()
 
     def test_timeout_when_daemon_dies_on_boot(self, tmp_path, monkeypatch):
         port = _free_port()
