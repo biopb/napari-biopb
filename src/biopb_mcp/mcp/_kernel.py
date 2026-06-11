@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# Env var carrying the inherited *write* end of the window-close pipe. The
+# in-kernel bootstrap (non-headless) writes a byte to this fd when the user
+# closes the napari window; the launcher's reader thread reaps the kernel back
+# to idle on the signal. The literal is mirrored in _bootstrap._install_window_
+# close_hook (kept in sync by this comment, like _deathwatch.ENV_FD).
+ENV_WINDOW_CLOSE_FD = "BIOPB_WINDOW_CLOSE_FD"
+
 # Prepended exec-line that installs the in-kernel parent-death watcher before
 # the (possibly slow) napari bootstrap runs. Paired with the inherited read-end
 # fd passed in BIOPB_PARENT_DEATH_FD; see _deathwatch and KernelHost._launch.
@@ -95,6 +102,7 @@ class KernelHost:
         watchdog_max_respawns: int = 3,
         watchdog_respawn_window: float = 60.0,
         parent_death_pipe: bool = True,
+        window_close_pipe: bool = True,
     ):
         self._extra_arguments = list(extra_arguments or [])
         self._kernel_name = kernel_name
@@ -129,6 +137,18 @@ class KernelHost:
         # read it to surface a terminal error instead of an endless "starting".
         self._start_error = None
 
+        # On-demand start (the kernel is NOT launched at construction): the
+        # launcher constructs the host idle and the first start_kernel tool call
+        # drives ensure_started(). _starting marks a bring-up in flight so a
+        # never-started host (idle) is distinguishable from one mid-boot.
+        self._starting = False
+        # Why the kernel was last torn down, when the cause is a user action
+        # rather than a crash (e.g. the user closed the napari window). Set just
+        # before the teardown; surfaced by execute()/health() so the agent is
+        # told *why* a running job vanished instead of a bare "not started".
+        # Cleared by ensure_started() on the next explicit start.
+        self._teardown_reason = None
+
         # -- orphan hardening (issue #13) -------------------------------
         # pgid captured at launch so the group-kill never re-derives it from a
         # possibly-dead / pid-recycled kernel pid.
@@ -137,6 +157,14 @@ class KernelHost:
         # launcher death) makes the kernel self-terminate (failure mode 1).
         self._parent_death_pipe = parent_death_pipe and os.name == "posix"
         self._death_w = None
+        # Window-close pipe (reverse of the death pipe): the *kernel* holds the
+        # write end and writes a byte when the user closes the napari window; the
+        # launcher holds this read end and a reader thread reaps the kernel back
+        # to idle on the signal. Only meaningful with a viewer (the launcher sets
+        # window_close_pipe=False for a headless kernel).
+        self._window_close_pipe = window_close_pipe and os.name == "posix"
+        self._window_r = None
+        self._window_thread = None
         # Liveness watchdog (failure mode 2): respawn an unexpectedly-dead
         # kernel after reaping its orphaned dask group, bounded to avoid a
         # crash-respawn thrash loop.
@@ -180,6 +208,55 @@ class KernelHost:
             self._start_error = None
             self._start_watchdog()
 
+    def ensure_started(self) -> dict:
+        """Idempotent, non-blocking on-demand start. Returns the host state.
+
+        The launcher constructs the host idle (no eager bring-up); the
+        ``start_kernel`` tool calls this on first demand. The first caller kicks
+        off the (slow) kernel + viewer + dask bring-up on a background thread and
+        gets ``{"state": "starting"}``; concurrent callers and a ready host
+        no-op. It is also the recovery path: an explicit start clears a prior
+        terminal failure / dead state / teardown reason and re-attempts (mirrors
+        ``restart()``), so a failed or window-closed kernel comes back without a
+        separate restart_kernel call.
+
+        Returns ``{"state": "ready"|"starting"}``.
+        """
+        with self._lock:
+            if self._ready.is_set():
+                return {"state": "ready"}
+            if self._starting:
+                return {"state": "starting"}
+            # Explicit (re)start: drop any stale terminal/teardown state so this
+            # attempt starts clean and a concurrent server_status reports
+            # "starting" rather than the old error.
+            self._start_error = None
+            self._teardown_reason = None
+            self._dead = False
+            self._respawn_times.clear()
+            self._starting = True
+        threading.Thread(
+            target=self._async_bringup, name="kernel-start", daemon=True
+        ).start()
+        return {"state": "starting"}
+
+    def _async_bringup(self):
+        """Background bring-up driver for ensure_started(): run the synchronous
+        start() and record its outcome (start() already sets _start_error on
+        failure; the launcher's old _start_kernel thread did the same)."""
+        try:
+            self.start()
+            logger.info("Kernel ready.")
+        except Exception:
+            logger.exception(
+                "Kernel startup failed; tools will report a terminal startup "
+                "error (call start_kernel to retry). See the kernel log for the "
+                "bootstrap traceback."
+            )
+        finally:
+            with self._lock:
+                self._starting = False
+
     def _launch(self):
         from jupyter_client import KernelManager
 
@@ -196,6 +273,8 @@ class KernelHost:
         if self._kernel_stderr is not None:
             popen_kwargs["stderr"] = self._kernel_stderr
 
+        pass_fds = []
+
         # Parent-death pipe: the kernel inherits the read end and self-kills its
         # process group when the launcher *process* dies (issue #13, mode 1).
         death_r = None
@@ -203,8 +282,22 @@ class KernelHost:
             death_r, self._death_w = os.pipe()
             env = dict(env)
             env[_deathwatch.ENV_FD] = str(death_r)
-            popen_kwargs["pass_fds"] = (death_r,)
+            pass_fds.append(death_r)
             extra_args = [_DEATHWATCH_ARG] + extra_args
+
+        # Window-close pipe (reverse direction): the kernel inherits the *write*
+        # end and writes a byte when the user closes the napari window; the
+        # launcher keeps the read end and a reader thread reaps the kernel back
+        # to idle on the signal. No exec-line — the bootstrap installs the hook.
+        win_w = None
+        if self._window_close_pipe:
+            self._window_r, win_w = os.pipe()
+            env = dict(env)
+            env[ENV_WINDOW_CLOSE_FD] = str(win_w)
+            pass_fds.append(win_w)
+
+        if pass_fds:
+            popen_kwargs["pass_fds"] = tuple(pass_fds)
 
         self._km = KernelManager(kernel_name=self._kernel_name)
         try:
@@ -220,17 +313,21 @@ class KernelHost:
                     **popen_kwargs,
                 )
             finally:
-                # The child has its own copy of the read end; the launcher keeps
-                # only the write end so its closure reaches the kernel.
-                if death_r is not None:
-                    try:
-                        os.close(death_r)
-                    except OSError:
-                        pass
+                # The child has its own copy of each inherited end; the launcher
+                # keeps the opposite end so a closure reaches across the pipe.
+                # Death pipe: launcher keeps the write end. Window pipe: launcher
+                # keeps the read end, so close its copy of the write end here.
+                for _fd in (death_r, win_w):
+                    if _fd is not None:
+                        try:
+                            os.close(_fd)
+                        except OSError:
+                            pass
             self._pgid = self._capture_pgid()
             self._kc = self._km.client()
             self._kc.start_channels()
             self._kc.wait_for_ready(timeout=self._startup_timeout)
+            self._start_window_watch()
         except Exception:
             self._shutdown_current()
             raise
@@ -300,30 +397,57 @@ class KernelHost:
         lock could not be acquired within ``busy_lock_timeout``), or
         ``starting`` (the kernel is not ready yet — see below).
 
-        The kernel boots off-thread (so the launcher can serve the MCP handshake
-        immediately), so a tool call may land before the kernel is ready. We do
-        NOT block the call on bring-up: a blocking wait could hang for the whole
+        The kernel is started on demand (start_kernel -> ensure_started) and
+        boots off-thread, so a tool call may land before it is ready. We do NOT
+        block the call on bring-up: a blocking wait could hang for the whole
         startup budget and trip the client's per-call timeout into an opaque
-        error. Instead, return immediately with a structured not-ready status
-        the agent can act on — ``error`` when the bring-up failed terminally
-        (``_start_error`` set; call restart_kernel) or ``starting`` when it is
-        still in progress (poll ``server_status`` / retry). ``server_status`` is
-        a cheap, non-blocking readiness probe meant for exactly this.
+        error. Instead, return immediately with a structured not-ready status the
+        agent can act on (see :meth:`_not_ready_result`) — ``not_started`` /
+        ``error`` (call start_kernel) or ``starting`` (poll ``server_status`` /
+        retry). ``server_status`` is a cheap, non-blocking readiness probe meant
+        for exactly this.
         """
         if not self._ready.is_set():
-            err = self._start_error
-            if err is not None:
-                return {
-                    "stdout": "",
-                    "result_text": "",
-                    "error_text": (
-                        "Kernel startup failed: "
-                        + err
-                        + " The kernel is not running; call restart_kernel "
-                        "to retry."
-                    ),
-                    "status": "error",
-                }
+            return self._not_ready_result()
+        return self._execute_internal(code, timeout)
+
+    def _not_ready_result(self) -> dict:
+        """Structured status for a tool call that landed while the kernel is not
+        ready, differentiated so the agent knows what to do:
+
+        * ``error`` — a terminal startup failure (``_start_error``) or a dead
+          kernel (respawn budget exhausted): call ``start_kernel`` to retry.
+        * ``starting`` — a bring-up is in flight: poll ``server_status`` / retry.
+        * ``not_started`` — idle / never started: call ``start_kernel`` first.
+
+        A user-attributed ``_teardown_reason`` (e.g. the user closed the window)
+        is appended so an abandoned job is explained, not bare.
+        """
+        reason = self._teardown_reason
+        suffix = f" ({reason})" if reason else ""
+        if self._start_error is not None:
+            return {
+                "stdout": "",
+                "result_text": "",
+                "error_text": (
+                    "Kernel startup failed: "
+                    + self._start_error
+                    + " The kernel is not running; call start_kernel to retry."
+                    + suffix
+                ),
+                "status": "error",
+            }
+        if self._dead:
+            return {
+                "stdout": "",
+                "result_text": "",
+                "error_text": (
+                    "Kernel is dead (respawn budget exhausted). Call "
+                    "start_kernel to launch a fresh kernel." + suffix
+                ),
+                "status": "error",
+            }
+        if self._starting:
             return {
                 "stdout": "",
                 "result_text": "",
@@ -333,7 +457,15 @@ class KernelHost:
                 ),
                 "status": "starting",
             }
-        return self._execute_internal(code, timeout)
+        return {
+            "stdout": "",
+            "result_text": "",
+            "error_text": (
+                "Kernel not started. Call start_kernel first, then poll "
+                "server_status until it reports ready." + suffix
+            ),
+            "status": "not_started",
+        }
 
     def _execute_internal(
         self, code: str, timeout: Optional[float] = None
@@ -441,11 +573,12 @@ class KernelHost:
         with self._lock:
             # Tell the watchdog this alive->dead transition is intentional.
             self._stopping = True
-            # A restart is a recovery attempt: clear any stale failure up front
-            # so a concurrent server_status/execute (which read _start_error
-            # without the lock) see "starting" (recovering) rather than the old
-            # error while we rebuild. A fresh failure below records a new one.
+            # A restart is a recovery attempt: clear any stale failure / teardown
+            # reason up front so a concurrent server_status/execute (which read
+            # them without the lock) see "starting" (recovering) rather than the
+            # old error while we rebuild. A fresh failure below records a new one.
             self._start_error = None
+            self._teardown_reason = None
             try:
                 try:
                     self._execute_locked(_DASK_RELEASE_SNIPPET, timeout=5.0)
@@ -525,6 +658,7 @@ class KernelHost:
         self._kc = None
         self._pgid = None
         self._close_death_pipe()
+        self._close_window_pipe()
 
     def _close_death_pipe(self):
         if self._death_w is not None:
@@ -533,6 +667,60 @@ class KernelHost:
             except OSError:
                 pass
             self._death_w = None
+
+    def _close_window_pipe(self):
+        # Sole closer of the read end (the reader thread never closes it), so a
+        # teardown by any path closes it exactly once. The reader thread is a
+        # daemon that exits on EOF once the kernel's write end is gone.
+        if self._window_r is not None:
+            try:
+                os.close(self._window_r)
+            except OSError:
+                pass
+            self._window_r = None
+        self._window_thread = None
+
+    # -- window-close watcher -------------------------------------------
+
+    def _start_window_watch(self):
+        """Start the window-close reader thread if the pipe is configured."""
+        fd = self._window_r
+        if fd is None:
+            return
+        self._window_thread = threading.Thread(
+            target=self._watch_window_close,
+            args=(fd,),
+            name="window-close-watch",
+            daemon=True,
+        )
+        self._window_thread.start()
+
+    def _watch_window_close(self, fd):
+        """Block until the kernel signals a window close (byte) or dies (EOF).
+
+        A byte = the user closed the napari window -> tear the kernel down to
+        idle so the agent rebuilds it with start_kernel; record a teardown reason
+        first so execute()/server_status tell the agent *why* (a running job is
+        abandoned). EOF = the kernel already went away via another teardown path
+        -> just exit. The fd is owned/closed by _close_window_pipe, so we never
+        close it here (avoids racing a concurrent teardown that closes it too).
+        """
+        try:
+            data = os.read(fd, 1)
+        except OSError:
+            return
+        if not data:
+            return  # EOF: kernel died via another path; nothing to do
+        if self._stopping:
+            return  # a restart/shutdown is already tearing the kernel down
+        self._teardown_reason = (
+            "the user closed the napari viewer window; the kernel was shut "
+            "down and any running job was stopped"
+        )
+        try:
+            self.shutdown()
+        except Exception:
+            logger.exception("teardown after window close failed")
 
     # -- liveness watchdog (issue #13, failure mode 2) ------------------
 
@@ -619,7 +807,9 @@ class KernelHost:
         return {
             "alive": self.is_alive(),
             "ready": self._ready.is_set(),
+            "starting": self._starting,
             "start_error": self._start_error,
+            "teardown_reason": self._teardown_reason,
             "busy": self.is_busy(),
             "dead": self._dead,
             "recent_respawns": len(self._respawn_times),

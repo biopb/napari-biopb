@@ -73,7 +73,9 @@ def mock_kernel_host():
     host.health.return_value = {
         "alive": True,
         "ready": True,
+        "starting": False,
         "start_error": None,
+        "teardown_reason": None,
         "busy": False,
         "dead": False,
         "recent_respawns": 0,
@@ -476,6 +478,39 @@ class TestInterruptRestart:
         assert "not initialized" in _server.restart_kernel()
 
 
+class TestStartKernel:
+    def test_starting_state_message(self, server_with_host):
+        server_with_host.ensure_started.return_value = {"state": "starting"}
+        result = _server.start_kernel()
+        server_with_host.ensure_started.assert_called_once()
+        assert "starting" in result.lower()
+        assert "server_status" in result
+
+    def test_ready_state_message(self, server_with_host):
+        server_with_host.ensure_started.return_value = {"state": "ready"}
+        result = _server.start_kernel()
+        assert "already running" in result.lower()
+
+    def test_no_host(self):
+        _server._kernel_host = None
+        assert "not initialized" in _server.start_kernel()
+
+    def test_execute_code_when_not_started_points_to_start_kernel(
+        self, server_with_host
+    ):
+        # A kernel-dependent tool funnels through host.execute(); a not_started
+        # status must surface the "call start_kernel" guidance verbatim.
+        server_with_host.execute.return_value = _result(
+            status="not_started",
+            error_text=(
+                "Kernel not started. Call start_kernel first, then poll "
+                "server_status until it reports ready."
+            ),
+        )
+        result = _server.execute_code("1 + 1")
+        assert "start_kernel" in result
+
+
 # -----------------------------------------------------------------------
 # server_status
 # -----------------------------------------------------------------------
@@ -557,7 +592,9 @@ class TestServerStatus:
         server_with_host.health.return_value = {
             "alive": True,
             "ready": False,
+            "starting": True,
             "start_error": None,
+            "teardown_reason": None,
             "busy": False,
             "dead": False,
             "recent_respawns": 0,
@@ -607,7 +644,7 @@ class TestServerStatus:
         result = _server.server_status()
         assert "failed" in result.lower()
         assert "no Qt platform" in result
-        assert "restart_kernel" in result
+        assert "start_kernel" in result
         assert "starting" not in result.lower()
         server_with_host.execute.assert_not_called()
 

@@ -38,6 +38,12 @@ _headless: bool = False
 # field carries the guidance that must hold on *every* turn — the operation
 # guardrails.
 _BASE_INSTRUCTIONS = (
+    "The napari kernel does NOT auto-start. Call `start_kernel` once at the "
+    "start of the session (and again to recover after a failure, or after the "
+    "user closes the viewer window), then poll `server_status` until it reports "
+    "the kernel ready before calling `execute_code` / `take_screenshot` / "
+    "`inspect_object`.\n"
+    "\n"
     "This biopb-mcp session drives a live napari viewer through a child IPython "
     "kernel; `execute_code` runs arbitrary Python in that kernel. Read these resources "
     "for detail before non-trivial work: guide://kernel (namespace, examples, "
@@ -643,6 +649,34 @@ def interrupt_kernel() -> str:
 
 
 @mcp.tool()
+def start_kernel() -> str:
+    """Start the napari kernel on demand (it does not auto-start).
+
+    The MCP server stays cheap and idle until you call this; it then brings up
+    the child IPython kernel, the napari viewer window, dask, and the tensor
+    client in the background. Non-blocking: it returns immediately with a
+    "starting" status — poll server_status until it reports the kernel ready,
+    then use execute_code / take_screenshot / inspect_object.
+
+    Call this once at the start of a session. It is also the recovery path:
+    after a failed start, a dead kernel, or the user closing the viewer window
+    (which tears the kernel down to idle), call start_kernel again to rebuild.
+    (restart_kernel is for hard-restarting an already-running kernel.)
+    """
+    host = _kernel_host
+    if host is None:
+        return "Error: kernel host not initialized"
+    state = host.ensure_started().get("state")
+    if state == "ready":
+        return "Kernel already running and ready."
+    return (
+        "Kernel starting (napari viewer / dask bring-up runs in the "
+        "background). Poll server_status until it reports the kernel ready, "
+        "then use execute_code / take_screenshot."
+    )
+
+
+@mcp.tool()
 def restart_kernel() -> str:
     """Hard-restart the kernel: the guaranteed stop for runaway execution.
 
@@ -720,14 +754,15 @@ def server_status() -> str:
     if health["recent_respawns"]:
         lines.append(f"  recent_respawns: {health['recent_respawns']}")
 
-    # Kernel-state summary: dead / failed / starting are mutually exclusive
-    # (when dead or failed, ready is also false), so report exactly one and
-    # return — don't fall through and print a second, contradictory state. Each
-    # also skips the kernel query below, which would block on readiness for the
-    # whole startup budget.
+    # Kernel-state summary: dead / failed / starting / not-started are mutually
+    # exclusive (each implies ready is false), so report exactly one and return —
+    # don't fall through and print a second, contradictory state. Each also skips
+    # the kernel query below, which would block on readiness for the whole
+    # startup budget. A user-attributed teardown reason (window close) is shown.
+    teardown = health.get("teardown_reason")
     if health["dead"]:
         lines.append(
-            "  state: DEAD — respawn budget exhausted; call restart_kernel"
+            "  state: DEAD — respawn budget exhausted; call start_kernel"
         )
         if health.get("start_error"):
             lines.append(f"    last error: {health['start_error']}")
@@ -739,11 +774,18 @@ def server_status() -> str:
         if health.get("start_error"):
             lines.append("  state: failed — kernel startup error:")
             lines.append(f"    {health['start_error']}")
-            lines.append("  (call restart_kernel to retry)")
-        else:
+            lines.append("  (call start_kernel to retry)")
+        elif health.get("starting"):
             lines.append(
                 "  state: starting — kernel/viewer still booting; retry shortly"
             )
+        else:
+            line = (
+                "  state: not started — call start_kernel to launch the kernel"
+            )
+            if teardown:
+                line += f" (torn down: {teardown})"
+            lines.append(line)
         return "\n".join(lines)
 
     res = host.execute(_STATUS_SNIPPET, timeout=15.0)
