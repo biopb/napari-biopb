@@ -402,7 +402,6 @@ class TestHealth:
             assert set(h) == {
                 "alive",
                 "ready",
-                "starting",
                 "start_error",
                 "teardown_reason",
                 "busy",
@@ -412,7 +411,6 @@ class TestHealth:
             }
             assert h["alive"] is True
             assert h["ready"] is True
-            assert h["starting"] is False
             assert h["start_error"] is None
             assert h["teardown_reason"] is None
             assert h["dead"] is False
@@ -625,25 +623,20 @@ class TestOnDemandStart:
             res = host.execute("1 + 1")
             assert res["status"] == "not_started"
             assert "start_kernel" in res["error_text"]
-            health = host.health()
-            assert health["ready"] is False
-            assert health["starting"] is False
+            assert host.health()["ready"] is False
+            assert host.is_alive() is False
         finally:
             host.shutdown()
 
-    def test_ensure_started_brings_up_and_is_idempotent(self):
+    def test_ensure_started_is_synchronous_and_idempotent(self):
         host = KernelHost(health_probe_code=None, watchdog_interval=0)
         try:
-            # First call kicks off the background bring-up; a rapid second call
-            # must not spawn a second kernel — it sees _starting and no-ops.
-            first = host.ensure_started()
-            second = host.ensure_started()
-            assert first["state"] == "starting"
-            assert second["state"] in ("starting", "ready")
-            assert host._ready.wait(timeout=60)
+            # Synchronous: ensure_started blocks until ready and reports ready
+            # (no "starting"/poll dance).
+            assert host.ensure_started() == {"state": "ready"}
             assert host.is_alive()
             assert host.execute("2 + 2")["status"] == "ok"
-            # Once ready, ensure_started is a no-op reporting ready.
+            # A ready kernel is a no-op.
             assert host.ensure_started() == {"state": "ready"}
         finally:
             host.shutdown()
@@ -654,10 +647,26 @@ class TestOnDemandStart:
         host = KernelHost(health_probe_code=None, watchdog_interval=0)
         try:
             host._start_error = "stale failure"
-            host.ensure_started()
-            assert host._ready.wait(timeout=60)
+            assert host.ensure_started() == {"state": "ready"}
             assert host._start_error is None
             assert host.is_alive()
+        finally:
+            host.shutdown()
+
+    def test_ensure_started_reports_error_on_failure(self):
+        # A bring-up failure is returned as a state dict (not raised) so the
+        # start_kernel tool can turn it into a message.
+        host = KernelHost(
+            health_probe_code="print('viewer' in dir())",
+            health_probe_expect="True",
+            startup_timeout=60.0,
+            watchdog_interval=0,
+        )
+        try:
+            result = host.ensure_started()
+            assert result["state"] == "error"
+            assert result["error"]
+            assert host.health()["ready"] is False
         finally:
             host.shutdown()
 
@@ -688,9 +697,8 @@ class TestWindowClosePipe:
             res = host.execute("1 + 1")
             assert res["status"] == "not_started"
             assert "window" in res["error_text"]
-            # ...and cleared by an explicit restart.
-            host.ensure_started()
-            assert host._ready.wait(timeout=60)
+            # ...and cleared by an explicit restart (synchronous).
+            assert host.ensure_started() == {"state": "ready"}
             assert host._teardown_reason is None
         finally:
             host.shutdown()

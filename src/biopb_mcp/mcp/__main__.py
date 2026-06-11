@@ -284,9 +284,9 @@ def main(argv=None):
     # On-demand start: the kernel is NOT launched here. The server stays cheap
     # and idle (no viewer window pops, no Qt abort on a display-less daemon)
     # until an agent calls the `start_kernel` tool, which drives
-    # host.ensure_started() — the slow kernel + napari/Qt viewer + dask bring-up
-    # runs off-thread there and tool calls that land before it is ready get a
-    # structured "not started" / "starting" status (see KernelHost.execute).
+    # host.ensure_started() — a synchronous bring-up that blocks that one tool
+    # call until the kernel is ready. Other tool calls landing before then get a
+    # structured "not started" status (see KernelHost.execute).
     if headless:
         logger.info(
             "Headless mode (no viewer; no display). Kernel starts on the first "

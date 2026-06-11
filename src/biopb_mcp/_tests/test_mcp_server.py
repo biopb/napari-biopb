@@ -73,7 +73,6 @@ def mock_kernel_host():
     host.health.return_value = {
         "alive": True,
         "ready": True,
-        "starting": False,
         "start_error": None,
         "teardown_reason": None,
         "busy": False,
@@ -479,17 +478,23 @@ class TestInterruptRestart:
 
 
 class TestStartKernel:
-    def test_starting_state_message(self, server_with_host):
-        server_with_host.ensure_started.return_value = {"state": "starting"}
-        result = _server.start_kernel()
-        server_with_host.ensure_started.assert_called_once()
-        assert "starting" in result.lower()
-        assert "server_status" in result
-
     def test_ready_state_message(self, server_with_host):
+        # ensure_started is synchronous: a ready result means the kernel is up.
         server_with_host.ensure_started.return_value = {"state": "ready"}
         result = _server.start_kernel()
-        assert "already running" in result.lower()
+        server_with_host.ensure_started.assert_called_once()
+        assert "ready" in result.lower()
+        assert "execute_code" in result
+
+    def test_error_state_message(self, server_with_host):
+        server_with_host.ensure_started.return_value = {
+            "state": "error",
+            "error": "no Qt platform",
+        }
+        result = _server.start_kernel()
+        assert "failed to start" in result.lower()
+        assert "no Qt platform" in result
+        assert "start_kernel" in result  # retry guidance
 
     def test_no_host(self):
         _server._kernel_host = None
@@ -592,7 +597,6 @@ class TestServerStatus:
         server_with_host.health.return_value = {
             "alive": True,
             "ready": False,
-            "starting": True,
             "start_error": None,
             "teardown_reason": None,
             "busy": False,
@@ -602,7 +606,27 @@ class TestServerStatus:
         }
         result = _server.server_status()
         assert "ready: False" in result
+        # alive but not ready -> booting (e.g. a watchdog respawn).
         assert "starting" in result.lower()
+        server_with_host.execute.assert_not_called()
+
+    def test_idle_kernel_reports_not_started(self, server_with_host):
+        # Not alive and not ready (never started / torn down): point the agent
+        # at start_kernel, don't query the kernel.
+        server_with_host.health.return_value = {
+            "alive": False,
+            "ready": False,
+            "start_error": None,
+            "teardown_reason": "the user closed the napari viewer window",
+            "busy": False,
+            "dead": False,
+            "recent_respawns": 0,
+            "watchdog_running": False,
+        }
+        result = _server.server_status()
+        assert "not started" in result.lower()
+        assert "start_kernel" in result
+        assert "napari viewer window" in result  # teardown attribution
         server_with_host.execute.assert_not_called()
 
     def test_dead_kernel_reports_only_dead_not_starting(

@@ -38,18 +38,16 @@ _headless: bool = False
 # field carries the guidance that must hold on *every* turn — the operation
 # guardrails.
 _BASE_INSTRUCTIONS = (
-    "The napari kernel does NOT auto-start. Call `start_kernel` once at the "
-    "start of the session (and again to recover after a failure, or after the "
-    "user closes the viewer window), then poll `server_status` until it reports "
-    "the kernel ready before calling `execute_code` / `take_screenshot` / "
-    "`inspect_object`.\n"
-    "\n"
     "This biopb-mcp session drives a live napari viewer through a child IPython "
     "kernel; `execute_code` runs arbitrary Python in that kernel. Read these resources "
     "for detail before non-trivial work: guide://kernel (namespace, examples, "
     "long-running jobs & cancellation), guide://tensor (data access/upload), "
     "guide://viewer (layers/camera/dims), guide://annotations "
     "(labels/points/shapes), guide://ops (server-side image-processing ops).\n"
+    "\n"
+    "The napari kernel does NOT auto-start. Call `start_kernel` once at the "
+    "start of the session, then poll `server_status` until it reports "
+    "the kernel ready.\n"
     "\n"
     "Operation guardrails (apply on every turn):\n"
     "- Use data from `client` or `viewer`; avoid the filesystem unless the user "
@@ -654,9 +652,9 @@ def start_kernel() -> str:
 
     The MCP server stays cheap and idle until you call this; it then brings up
     the child IPython kernel, the napari viewer window, dask, and the tensor
-    client in the background. Non-blocking: it returns immediately with a
-    "starting" status — poll server_status until it reports the kernel ready,
-    then use execute_code / take_screenshot / inspect_object.
+    client. This BLOCKS until the kernel is ready (or the bring-up fails), so on
+    return you can use execute_code / take_screenshot / inspect_object directly
+    (no polling needed). A ready kernel is a no-op.
 
     Call this once at the start of a session. It is also the recovery path:
     after a failed start, a dead kernel, or the user closing the viewer window
@@ -666,13 +664,16 @@ def start_kernel() -> str:
     host = _kernel_host
     if host is None:
         return "Error: kernel host not initialized"
-    state = host.ensure_started().get("state")
-    if state == "ready":
-        return "Kernel already running and ready."
+    result = host.ensure_started()
+    if result.get("state") == "ready":
+        return (
+            "Kernel ready. The napari viewer, dask, and tensor client are up; "
+            "use execute_code / take_screenshot now."
+        )
     return (
-        "Kernel starting (napari viewer / dask bring-up runs in the "
-        "background). Poll server_status until it reports the kernel ready, "
-        "then use execute_code / take_screenshot."
+        "Kernel failed to start: "
+        + str(result.get("error", "unknown error"))
+        + " Check server_status; call start_kernel to retry."
     )
 
 
@@ -775,7 +776,10 @@ def server_status() -> str:
             lines.append("  state: failed — kernel startup error:")
             lines.append(f"    {health['start_error']}")
             lines.append("  (call start_kernel to retry)")
-        elif health.get("starting"):
+        elif health.get("alive"):
+            # A kernel process exists but isn't ready yet (e.g. a watchdog
+            # respawn in flight). start_kernel itself blocks, so its caller won't
+            # see this — but a concurrent observer / respawn can.
             lines.append(
                 "  state: starting — kernel/viewer still booting; retry shortly"
             )

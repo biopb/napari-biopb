@@ -123,25 +123,26 @@ class KernelHost:
         self._kc = None
         self._lock = threading.RLock()
         # Set once the kernel has launched AND its bootstrap health probe has
-        # passed. The launcher starts the kernel off-thread so the MCP handshake
-        # is served immediately (kernel + Qt viewer bring-up is slow and, on
-        # WSL, unreliable within the client's startup timeout); tool calls wait
-        # on this rather than racing a half-built kernel. Cleared on teardown.
+        # passed. The kernel is started on demand (start_kernel -> ensure_started)
+        # and tool calls gate on this so they never dispatch into a half-built or
+        # not-yet-started kernel (they get a structured not-ready status instead).
+        # Cleared on teardown.
         self._ready = threading.Event()
-        # The reason the last bring-up failed terminally (str), or None. Because
-        # start() runs on a background thread and only logs its raise, a failed
-        # bootstrap (missing Qt/OpenGL, a health probe that never passes) would
-        # otherwise be indistinguishable from a still-in-progress startup — both
-        # leave _ready unset. Set under the lock by start()/restart()/respawn on
+        # The reason the last bring-up failed terminally (str), or None. A failed
+        # bootstrap (missing Qt/OpenGL, a health probe that never passes) and a
+        # never-started/booting kernel both leave _ready unset, so this records
+        # *why* so a tool call can report a terminal error rather than a generic
+        # "starting". Set under the lock by start()/restart()/respawn on
         # failure and cleared on a successful bring-up; execute() and health()
         # read it to surface a terminal error instead of an endless "starting".
         self._start_error = None
 
-        # On-demand start (the kernel is NOT launched at construction): the
+        # On-demand start: the kernel is NOT launched at construction. The
         # launcher constructs the host idle and the first start_kernel tool call
-        # drives ensure_started(). _starting marks a bring-up in flight so a
-        # never-started host (idle) is distinguishable from one mid-boot.
-        self._starting = False
+        # drives ensure_started() (synchronous, like restart()). A never-started
+        # host (idle: not alive) is distinguished from one mid-boot (alive but
+        # not ready, e.g. a watchdog respawn) via is_alive(), so no extra flag is
+        # needed.
         # Why the kernel was last torn down, when the cause is a user action
         # rather than a crash (e.g. the user closed the napari window). Set just
         # before the teardown; surfaced by execute()/health() so the agent is
@@ -182,16 +183,15 @@ class KernelHost:
     def start(self):
         """Launch the kernel, wait until ready, then run the health probe.
 
-        Holds the lifecycle lock for the whole bring-up. The launcher runs
-        start() on a background thread (so the MCP handshake is served before
-        the slow kernel/viewer bring-up finishes), which means a client can call
-        restart_kernel — i.e. restart() — while this is still in _launch() /
-        _run_health_probe(). restart()/shutdown() take the same lock, so taking
-        it here serializes those against the initial start: without it both
-        paths mutate the shared _km/_kc/_pgid state concurrently and can leave
-        the host attached to the wrong kernel or leak an orphaned kernel
-        process. The lock is reentrant, so the health probe's internal
-        execute() re-enters on this thread without deadlocking.
+        Holds the lifecycle lock for the whole bring-up. start() is the
+        synchronous primitive: ensure_started() (start_kernel) and the tests call
+        it. Taking the lock serializes it against a concurrent restart()/
+        shutdown() (which take the same lock); without it both paths mutate the
+        shared _km/_kc/_pgid state concurrently and can leave the host attached to
+        the wrong kernel or leak an orphaned kernel process. The lock is
+        reentrant, so the health probe's internal execute() — and ensure_started()
+        calling start() while already holding the lock — re-enter without
+        deadlocking.
         """
         with self._lock:
             try:
@@ -199,63 +199,45 @@ class KernelHost:
                 self._run_health_probe()
             except Exception as exc:
                 # Record *why* so a tool call reports a terminal startup error
-                # rather than waiting out the startup budget and reporting
-                # "starting" forever (the launcher's background thread only logs
-                # this raise). _run_health_probe folds the in-kernel bootstrap
-                # traceback into its message, so the reason flows through.
+                # (via _not_ready_result) instead of an opaque failure.
+                # _run_health_probe folds the in-kernel bootstrap traceback into
+                # its message, so the reason flows through.
                 self._start_error = str(exc) or repr(exc)
                 raise
             self._start_error = None
             self._start_watchdog()
 
     def ensure_started(self) -> dict:
-        """Idempotent, non-blocking on-demand start. Returns the host state.
+        """Idempotent, synchronous on-demand start. Returns the host state.
 
         The launcher constructs the host idle (no eager bring-up); the
-        ``start_kernel`` tool calls this on first demand. The first caller kicks
-        off the (slow) kernel + viewer + dask bring-up on a background thread and
-        gets ``{"state": "starting"}``; concurrent callers and a ready host
-        no-op. It is also the recovery path: an explicit start clears a prior
-        terminal failure / dead state / teardown reason and re-attempts (mirrors
-        ``restart()``), so a failed or window-closed kernel comes back without a
-        separate restart_kernel call.
+        ``start_kernel`` tool calls this on first demand. A ready host no-ops;
+        otherwise this brings the kernel up and **blocks until it is ready or the
+        bring-up fails** (bounded by ``startup_timeout``) — the same blocking
+        contract as :meth:`restart`. It is also the recovery path: an explicit
+        start clears a prior terminal failure / dead state / teardown reason (and
+        tears down a half-up kernel left by a failed probe) and re-attempts, so a
+        failed or window-closed kernel comes back without a separate
+        restart_kernel call.
 
-        Returns ``{"state": "ready"|"starting"}``.
+        Returns ``{"state": "ready"}`` or ``{"state": "error", "error": <why>}``.
         """
         with self._lock:
             if self._ready.is_set():
                 return {"state": "ready"}
-            if self._starting:
-                return {"state": "starting"}
-            # Explicit (re)start: drop any stale terminal/teardown state so this
-            # attempt starts clean and a concurrent server_status reports
-            # "starting" rather than the old error.
-            self._start_error = None
+            # Explicit (re)start: drop any stale terminal/teardown state, and
+            # tear down a half-up kernel from a prior failed probe so _launch
+            # doesn't orphan it.
             self._teardown_reason = None
             self._dead = False
             self._respawn_times.clear()
-            self._starting = True
-        threading.Thread(
-            target=self._async_bringup, name="kernel-start", daemon=True
-        ).start()
-        return {"state": "starting"}
-
-    def _async_bringup(self):
-        """Background bring-up driver for ensure_started(): run the synchronous
-        start() and record its outcome (start() already sets _start_error on
-        failure; the launcher's old _start_kernel thread did the same)."""
-        try:
-            self.start()
-            logger.info("Kernel ready.")
-        except Exception:
-            logger.exception(
-                "Kernel startup failed; tools will report a terminal startup "
-                "error (call start_kernel to retry). See the kernel log for the "
-                "bootstrap traceback."
-            )
-        finally:
-            with self._lock:
-                self._starting = False
+            if self._km is not None:
+                self._shutdown_current()
+            try:
+                self.start()
+            except Exception as exc:
+                return {"state": "error", "error": str(exc) or repr(exc)}
+            return {"state": "ready"}
 
     def _launch(self):
         from jupyter_client import KernelManager
@@ -397,14 +379,13 @@ class KernelHost:
         lock could not be acquired within ``busy_lock_timeout``), or
         ``starting`` (the kernel is not ready yet — see below).
 
-        The kernel is started on demand (start_kernel -> ensure_started) and
-        boots off-thread, so a tool call may land before it is ready. We do NOT
-        block the call on bring-up: a blocking wait could hang for the whole
-        startup budget and trip the client's per-call timeout into an opaque
-        error. Instead, return immediately with a structured not-ready status the
-        agent can act on (see :meth:`_not_ready_result`) — ``not_started`` /
-        ``error`` (call start_kernel) or ``starting`` (poll ``server_status`` /
-        retry). ``server_status`` is a cheap, non-blocking readiness probe meant
+        The kernel is started on demand (start_kernel -> ensure_started), so a
+        tool call may land while it is not running — idle/never-started, a failed
+        start, or mid watchdog-respawn. We do NOT block on bring-up here: instead
+        return immediately with a structured not-ready status the agent can act on
+        (see :meth:`_not_ready_result`) — ``not_started`` / ``error`` (call
+        start_kernel) or ``starting`` (a respawn in flight; poll ``server_status``
+        / retry). ``server_status`` is a cheap, non-blocking readiness probe meant
         for exactly this.
         """
         if not self._ready.is_set():
@@ -417,7 +398,9 @@ class KernelHost:
 
         * ``error`` — a terminal startup failure (``_start_error``) or a dead
           kernel (respawn budget exhausted): call ``start_kernel`` to retry.
-        * ``starting`` — a bring-up is in flight: poll ``server_status`` / retry.
+        * ``starting`` — a kernel exists but isn't ready yet (a watchdog respawn
+          in progress): poll ``server_status`` / retry. (start_kernel itself is
+          synchronous, so its caller blocks rather than seeing this.)
         * ``not_started`` — idle / never started: call ``start_kernel`` first.
 
         A user-attributed ``_teardown_reason`` (e.g. the user closed the window)
@@ -447,7 +430,9 @@ class KernelHost:
                 ),
                 "status": "error",
             }
-        if self._starting:
+        if self.is_alive():
+            # A kernel exists but its bootstrap/health probe hasn't passed yet
+            # (e.g. a watchdog respawn in flight) — booting, not idle.
             return {
                 "stdout": "",
                 "result_text": "",
@@ -807,7 +792,6 @@ class KernelHost:
         return {
             "alive": self.is_alive(),
             "ready": self._ready.is_set(),
-            "starting": self._starting,
             "start_error": self._start_error,
             "teardown_reason": self._teardown_reason,
             "busy": self.is_busy(),
