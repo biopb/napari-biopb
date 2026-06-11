@@ -3,9 +3,15 @@
 **Status:** Direction 2 (on-demand kernel) is **implemented** — though as
 *explicit* start (a `start_kernel` tool the agent calls), **not** the implicit
 lazy-on-first-`execute()` trigger this note sketches; see the "Direction 2"
-section below for the as-built notes. Direction 1 (http-only) remains design /
-future reference. Captures directions agreed in discussion so a future
-implementer (or future us) can pick them up.
+section below for the as-built notes. Direction 1 (http-only) is **in
+progress: stdio is formally deprecated** (June 2026) — launching the stdio
+transport now emits a `DeprecationWarning` plus a logged migration recipe
+(`_server.run_stdio`), and the `--transport` help / config defaults are marked
+accordingly. Behavior is unchanged during the deprecation window (the default
+transport remains stdio); removal, the installer `transport` migration, and
+retiring the `kernel_log` / fd-1 machinery come with the cutover. Captures
+directions agreed in discussion so a future implementer (or future us) can
+pick them up.
 
 **Why this exists.** Adding the web "observe" UI (`mcp/_observe.py`)
 exposed a structural weakness: a feature that worked under the **http** transport
@@ -201,6 +207,10 @@ and only spins up the GUI kernel when a client actually uses it.
 ## References
 
 - [sparfenyuk/mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) — generic
-  streamable-http ↔ stdio bridge (PyPI).
+  streamable-http ↔ stdio bridge (PyPI). **Vetted June 2026 — see
+  [mcp-proxy-vet.md](mcp-proxy-vet.md):** viable only with pinned deps, an
+  upstream fix for the dropped initialize `instructions`, and a shim-level
+  lifetime guard; vendoring the ~150-line bridge is the recommended
+  alternative.
 - [Claude Code MCP docs](https://code.claude.com/docs/en/mcp) — native http
   transport (`claude mcp add --transport http`).
