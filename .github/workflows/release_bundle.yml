@@ -86,6 +86,40 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.ref || '' }}
+          fetch-depth: 0 # full history + tags so setuptools_scm derives the version
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      # Collect ALL THREE wheels into one release so the installer/auto-updater
+      # has a single source of truth (issue: unify release location). The
+      # biopb-mcp wheel + sdist are built here from the tagged checkout; the
+      # version-paired biopb + biopb-tensor-server wheels are pulled from the
+      # exact direct-reference URLs pinned in pyproject's [dependency-groups]
+      # integration group — so bumping the server release only edits pyproject.
+      - name: Build biopb-mcp wheel + sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build .
+
+      - name: Collect paired biopb + tensor-server wheels
+        run: |
+          mkdir -p release-wheels
+          cp dist/*.whl dist/*.tar.gz release-wheels/
+          grep -oE 'https://github.com/biopb/biopb/releases/download/[^"]+\.whl' pyproject.toml \
+            | sort -u | while read -r url; do
+              echo "Downloading $url"
+              curl -fL --retry 3 -o "release-wheels/$(basename "$url")" "$url"
+            done
+          echo "Release wheels:"
+          ls -l release-wheels
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -114,6 +148,22 @@ jobs:
             **Note**: These are unsigned installers. On macOS, right-click and select "Open" to bypass Gatekeeper. On Windows, click "Run anyway" when prompted.
 
             This bundle includes napari with the biopb-mcp plugin pre-installed.
-          files: artifacts/*
+
+            ## Wheels
+
+            This release also bundles all three Python wheels needed for a
+            from-source install, so an installer/auto-updater can pull
+            everything from one place instead of from PyPI + the
+            biopb-tensor-server release:
+
+            - `biopb_mcp-*.whl` — the MCP server / napari plugin (also on PyPI)
+            - `biopb-*.whl` — the version-paired biopb client (Arrow Flight tensor)
+            - `biopb_tensor_server-*.whl` — the local tensor server
+
+            The biopb / biopb-tensor-server wheels are the exact builds pinned in
+            this tag's `pyproject.toml` `[dependency-groups].integration`.
+          files: |
+            artifacts/*
+            release-wheels/*
           draft: false
           prerelease: false
