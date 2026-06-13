@@ -741,6 +741,19 @@ class TensorBrowserWidget(QWidget):
         self._clear_error()
         self._apply_filter()
 
+    def closeEvent(self, event):
+        """Detach our source-watch hook, but leave the watcher running.
+
+        The ``TensorConnection`` is shared with the kernel/agent (which reads
+        ``sources`` live and starts its own watch on the same connection), so we
+        must not stop the watcher when only this widget closes — that would kill
+        the agent's self-healing. We just drop our callback so the daemon thread
+        stops emitting into this soon-to-be-destroyed widget (issue #44).
+        """
+        if self._conn.on_sources_changed == self._sources_changed.emit:
+            self._conn.on_sources_changed = None
+        super().closeEvent(event)
+
     def _build_and_display_tree(self, filtered_ids: Set[str] | None = None):
         """Build tree from sources and display in widget."""
         self._tree_widget.clear()
