@@ -108,16 +108,28 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build .
 
-      - name: Collect paired biopb + tensor-server wheels
+      - name: Collect paired biopb + tensor-server wheels + webapp
         run: |
           mkdir -p release-wheels
           cp dist/*.whl dist/*.tar.gz release-wheels/
+          base=""
           grep -oE 'https://github.com/biopb/biopb/releases/download/[^"]+\.whl' pyproject.toml \
             | sort -u | while read -r url; do
               echo "Downloading $url"
               curl -fL --retry 3 -o "release-wheels/$(basename "$url")" "$url"
             done
-          echo "Release wheels:"
+          # The migrated installer pulls the data-browser webapp from THIS release
+          # too (single source of truth — docs/installer-migration.md). It lives on
+          # the same biopb server-v* release as the paired wheels, so derive that
+          # release's asset base from a pinned wheel URL and fetch webapp.tar.gz.
+          base=$(grep -oE 'https://github.com/biopb/biopb/releases/download/[^/]+' pyproject.toml | head -1)
+          if [ -n "$base" ]; then
+            echo "Downloading $base/webapp.tar.gz"
+            curl -fL --retry 3 -o "release-wheels/webapp.tar.gz" "$base/webapp.tar.gz"
+          else
+            echo "WARNING: could not derive webapp base URL from pyproject; skipping webapp" >&2
+          fi
+          echo "Release assets:"
           ls -l release-wheels
 
       - name: Download all artifacts
@@ -149,21 +161,34 @@ jobs:
 
             This bundle includes napari with the biopb-mcp plugin pre-installed.
 
-            ## Wheels
+            ## One-line install
 
-            This release also bundles all three Python wheels needed for a
-            from-source install, so an installer/auto-updater can pull
-            everything from one place instead of from PyPI + the
-            biopb-tensor-server release:
+            ```sh
+            curl -fsSL https://biopb.org/install.sh | bash      # Linux / macOS / WSL
+            irm https://biopb.org/install.ps1 | iex             # Windows PowerShell
+            ```
+
+            The installer (`install.sh` / `install.ps1`, also attached here) pulls
+            the matched triple of wheels + the data browser from this one release.
+
+            ## Bundled assets
+
+            Everything an installer/auto-updater needs from a single place, instead
+            of PyPI + the biopb-tensor-server release:
 
             - `biopb_mcp-*.whl` — the MCP server / napari plugin (also on PyPI)
             - `biopb-*.whl` — the version-paired biopb client (Arrow Flight tensor)
             - `biopb_tensor_server-*.whl` — the local tensor server
+            - `webapp.tar.gz` — the data-browser web UI
+            - `install.sh` / `install.ps1` — the bootstrap installers
 
-            The biopb / biopb-tensor-server wheels are the exact builds pinned in
-            this tag's `pyproject.toml` `[dependency-groups].integration`.
+            The biopb / biopb-tensor-server wheels and the webapp are the exact
+            builds from the server release pinned in this tag's `pyproject.toml`
+            `[dependency-groups].integration`.
           files: |
             artifacts/*
             release-wheels/*
+            install/install.sh
+            install/install.ps1
           draft: false
           prerelease: false
