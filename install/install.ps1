@@ -781,11 +781,21 @@ function Install-Biopb {
                 $webAsset = $release.assets | Where-Object { $_.name -eq 'webapp.tar.gz' } | Select-Object -First 1
                 $webUrl = if ($webAsset) { $webAsset.browser_download_url } else { "$RepoUrl/releases/download/$latestTag/webapp.tar.gz" }
                 $tarball = Join-Path $env:TEMP "biopb-webapp.tar.gz"
-                Invoke-WebRequest -Uri $webUrl -OutFile $tarball
-                tar -xzf $tarball -C $WebappDir --strip-components=1
-                Remove-Item -LiteralPath $tarball -Force -ErrorAction SilentlyContinue
-                Set-FileUtf8NoBom -Path $versionFile -Content $latestTag
-                Write-Ok "Data browser installed to: $WebappDir"
+                # Guard a missing asset: under $ErrorActionPreference='Stop' a
+                # failed download would abort the whole installer, and writing
+                # .version after a broken extract would stamp it "installed".
+                # Only mark success once the tarball is fetched and unpacked.
+                $webOk = $true
+                try { Invoke-WebRequest -Uri $webUrl -OutFile $tarball }
+                catch { $webOk = $false }
+                if ($webOk) {
+                    tar -xzf $tarball -C $WebappDir --strip-components=1
+                    Remove-Item -LiteralPath $tarball -Force -ErrorAction SilentlyContinue
+                    Set-FileUtf8NoBom -Path $versionFile -Content $latestTag
+                    Write-Ok "Data browser installed to: $WebappDir"
+                } else {
+                    Write-Warn2 "No webapp.tar.gz in release $latestTag; server will run in API-only mode"
+                }
             }
         } else {
             Write-Warn2 "Could not fetch latest release, data browser not installed"

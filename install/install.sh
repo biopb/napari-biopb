@@ -966,10 +966,19 @@ install_biopb() {
                 local webapp_url
                 webapp_url=$(_release_asset_url 'webapp\.tar\.gz')
                 webapp_url="${webapp_url:-$REPO_URL/releases/download/$RELEASE_TAG/webapp.tar.gz}"
-                curl -fsSL "$webapp_url" \
-                    | tar -xzf - -C "$WEBAPP_DIR" --strip-components=1
-                printf '%s' "$RELEASE_TAG" > "$WEBAPP_DIR/.version"
-                _ok "Data browser installed to: $WEBAPP_DIR"
+                # mktemp (not "$WHEELS_DIR/...") because WHEELS_DIR is only set
+                # in release mode; under `set -u` it would abort a source-mode
+                # install with the webapp enabled.
+                local tmp
+                tmp=$(mktemp)
+                if curl -fsSL "$webapp_url" -o "$tmp" 2>/dev/null; then
+                    tar -xzf "$tmp" -C "$WEBAPP_DIR" --strip-components=1
+                    printf '%s' "$RELEASE_TAG" > "$WEBAPP_DIR/.version"
+                    _ok "Data browser installed to: $WEBAPP_DIR"
+                else
+                    _warn "No webapp.tar.gz in release $RELEASE_TAG; server will run in API-only mode"
+                fi
+                rm -f "$tmp"
             fi
         else
             _warn "Could not fetch latest release, data browser not installed"
